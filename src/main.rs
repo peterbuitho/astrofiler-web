@@ -165,7 +165,8 @@ async fn main() -> Result<()> {
         .with_context(|| format!("listening on {addr}"))?;
     // Printed as well as logged: the log only shows warnings on stderr.
     let started = format!(
-        "AstroFiler web on http://{addr}, repository {}, catalogue {}",
+        "AstroFiler web {} on http://{addr}, repository {}, catalogue {}",
+        env!("CARGO_PKG_VERSION"),
         app.cfg().repo.display(),
         app.db_path.display()
     );

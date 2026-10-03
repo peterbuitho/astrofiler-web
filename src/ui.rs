@@ -33,6 +33,7 @@ pub fn page(app: &AppState, active: &str, live: bool, body: Markup) -> Markup {
             body {
                 nav {
                     strong { "AstroFiler" }
+                    small class="version" { "v" (env!("CARGO_PKG_VERSION")) }
                     @for (href, label) in TABS {
                         a href=(href) class=[(*href == active).then_some("active")] { (label) }
                     }
