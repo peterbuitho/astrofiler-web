@@ -8,14 +8,14 @@ services:
     ports:
       - "8080:8080"
     environment:
-      TZ: Europe/Copenhagen
+      TZ: Europe/London
       # Used the first time only, to create the settings file.
       ASTROFILER_WEB_REPO: /photo/Astro
       ASTROFILER_WEB_INBOX: /photo/AstroInbox
       # The folder picker starts here and can't leave it.
       ASTROFILER_WEB_ROOT: /photo
       # The same folder as your desktop mounts it, so copied paths open there.
-      ASTROFILER_WEB_DESKTOP_ROOT: /mnt/nas/photo
+      ASTROFILER_WEB_DESKTOP_ROOT: /mnt/photo
       # Uncomment to ask for a password (any user name).
       # ASTROFILER_WEB_PASSWORD: change-me
     volumes:
