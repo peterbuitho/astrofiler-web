@@ -1,0 +1,25 @@
+services:
+  astrofiler:
+    image: ntmb/astrofiler-web:latest
+    container_name: astrofiler
+    restart: unless-stopped
+    # The NAS user and group that own the share (run `id` over SSH to find them).
+    user: "1026:100"
+    ports:
+      - "8080:8080"
+    environment:
+      TZ: Europe/Copenhagen
+      # Used the first time only, to create the settings file.
+      ASTROFILER_WEB_REPO: /photo/Astro
+      ASTROFILER_WEB_INBOX: /photo/AstroInbox
+      # The folder picker starts here and can't leave it.
+      ASTROFILER_WEB_ROOT: /photo
+      # The same folder as your desktop mounts it, so copied paths open there.
+      ASTROFILER_WEB_DESKTOP_ROOT: /mnt/nas/photo
+      # Uncomment to ask for a password (any user name).
+      # ASTROFILER_WEB_PASSWORD: change-me
+    volumes:
+      # One mount for the repository and the inbox: a move between two
+      # separate mounts would copy every file instead of renaming it.
+      - /volume1/photo:/photo
+      - /volume1/docker/astrofiler:/data

@@ -1,0 +1,29 @@
+[package]
+name = "astrofiler-web"
+version = "0.1.0"
+edition = "2021"
+description = "Web interface for AstroFiler, to run next to the files (e.g. in Docker on a NAS)"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/peterbuitho/astrofiler-web"
+
+[dependencies]
+astrofiler = { git = "https://github.com/peterbuitho/astrofiler-rs", default-features = false }
+anyhow = "1"
+axum = "0.8"
+axum-extra = { version = "0.12", features = ["form", "query"] }
+base64 = "0.22"
+log = "0.4"
+maud = { version = "0.27", features = ["axum"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
