@@ -152,6 +152,16 @@ async fn shutdown() {
 #[tokio::main]
 async fn main() -> Result<()> {
     logging::init(std::env::var("ASTROFILER_WEB_VERBOSE").is_ok(), true);
+    // File work reads that many files at once, by default one per core. On a
+    // NAS that leaves nothing for the web pages, so cap it (RAYON_NUM_THREADS
+    // sets it by hand).
+    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+        std::env::set_var(
+            "RAYON_NUM_THREADS",
+            cores.saturating_sub(1).clamp(1, 4).to_string(),
+        );
+    }
     let cfg = load_config()?;
     let app = AppState::new(cfg);
     if let Some(dir) = app.db_path.parent() {
@@ -416,5 +426,52 @@ mod tests {
         let (_, jobs) = get(&app, "/jobs").await;
         assert!(jobs.contains("NGC_281_Pacman_Nebula"), "{jobs}");
         assert!(jobs.contains("1 are copies"), "{jobs}");
+    }
+
+    #[tokio::test]
+    async fn move_files_catalogued_in_place_into_the_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        // A folder inside the repository, catalogued where it is by a sync.
+        let old = tmp.path().join("astro/repo/C 7 Spiral Galaxy/C 7_sub");
+        frame(&old, "a.fits", "C 7", "2026-01-20T01:00:00");
+        frame(&old, "b.fits", "C 7", "2026-01-20T01:01:00");
+        frame(&old, "c.fits", "C 7", "2026-01-20T01:02:00");
+        assert_eq!(post(&app, "/sync", "").await, StatusCode::SEE_OTHER);
+        wait_idle(&app).await;
+        assert_eq!(db::all_files(&app.conn().unwrap(), false).unwrap().len(), 3);
+        // A processed picture, and what the telescope leaves behind.
+        let folder = tmp.path().join("astro/repo/C 7 Spiral Galaxy");
+        std::fs::write(folder.join("C 7.png"), b"picture").unwrap();
+        std::fs::write(folder.join("Stacked_778_C 7_thn.jpg"), b"thumb").unwrap();
+        std::fs::write(old.join("Light_C 7_20.0s.jpg"), b"sub preview").unwrap();
+        for n in ["a", "b", "c"] {
+            std::fs::write(old.join(format!("{n}.jpg")), b"sub preview").unwrap();
+        }
+
+        let form = format!(
+            "folder={}&placement=move&on_conflict=skip",
+            tmp.path().join("astro/repo/C 7 Spiral Galaxy").display()
+        );
+        assert_eq!(post(&app, "/load", &form).await, StatusCode::SEE_OTHER);
+        wait_idle(&app).await;
+        let files = db::all_files(&app.conn().unwrap(), false).unwrap();
+        assert_eq!(files.len(), 3);
+        for f in &files {
+            assert!(f.name.contains("/repo/Light/C_7"), "{}", f.name);
+            assert!(std::path::Path::new(&f.name).exists(), "{}", f.name);
+        }
+        assert!(!old.join("a.fits").exists());
+        // The picture went to the object's folder; the telescope's stayed.
+        let object_dir = tmp.path().join("astro/repo/Light").join("C_7");
+        let moved = std::fs::read_dir(tmp.path().join("astro/repo/Light"))
+            .unwrap()
+            .flatten()
+            .any(|d| d.path().join("C 7.png").exists());
+        assert!(moved, "{}", object_dir.display());
+        assert!(!folder.join("C 7.png").exists());
+        assert!(folder.join("Stacked_778_C 7_thn.jpg").exists());
+        assert!(old.join("Light_C 7_20.0s.jpg").exists());
+        assert!(old.join("a.jpg").exists());
     }
 }

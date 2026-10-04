@@ -108,6 +108,7 @@ impl Jobs {
         let jobs = self.clone();
         let label = name.to_string();
         std::thread::spawn(move || {
+            lower_priority();
             let cfg = jobs.0.cfg.read().unwrap().clone();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 db::open(&jobs.0.db_path).and_then(|mut conn| work(&mut conn, &cfg, &state))
@@ -183,6 +184,28 @@ impl Jobs {
         inner.running.is_empty() && inner.queued.is_empty()
     }
 }
+
+/// Let the web pages go first: file work runs at a lower CPU and disk
+/// priority. Threads the task starts (copy parts, hashing pools) inherit it.
+#[cfg(target_os = "linux")]
+fn lower_priority() {
+    // SAFETY: plain system calls on the calling thread, no pointers involved.
+    unsafe {
+        // who = 0 is the calling thread on Linux.
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+        // I/O class best-effort (2), lowest level (7).
+        const IOPRIO_WHO_PROCESS: libc::c_long = 1;
+        libc::syscall(
+            libc::SYS_ioprio_set,
+            IOPRIO_WHO_PROCESS,
+            0 as libc::c_long,
+            ((2 << 13) | 7) as libc::c_long,
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lower_priority() {}
 
 fn push_note(inner: &mut Inner, failed: bool, text: String) {
     inner.notes.push_front((failed, text));

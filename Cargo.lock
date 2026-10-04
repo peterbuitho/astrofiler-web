@@ -171,13 +171,14 @@ dependencies = [
 
 [[package]]
 name = "astrofiler-web"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "astrofiler",
  "axum",
  "axum-extra",
  "base64",
+ "libc",
  "log",
  "maud",
  "rusqlite",

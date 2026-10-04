@@ -13,7 +13,7 @@ layout and settings file are the same as the desktop app's.
 | Page | |
 |---|---|
 | Images | Search (plus an advanced SQLite condition), filter, sort, group by object or date; open a file, edit a header field, export, remove from the catalogue or delete from disk (typed confirmation) |
-| Load | File a folder into the repository (move, copy or catalogue in place), optionally deleting originals already filed; sync the repository |
+| Load | File a folder into the repository (move, copy or catalogue in place), optionally deleting originals already filed; processed JPG/PNG/TIFF pictures go along under their own names, telescope thumbnails stay; sync the repository |
 | Sessions | Create, clear and export sessions |
 | Batch | Merge objects, verify, regenerate, folder layout, clean previews |
 | Duplicates | Identical files, and deleting the extra copies |
