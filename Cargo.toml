@@ -1,6 +1,6 @@
 [package]
 name = "astrofiler-web"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Web interface for AstroFiler, to run next to the files (e.g. in Docker on a NAS)"
 license = "GPL-3.0-or-later"
@@ -16,7 +16,8 @@ log = "0.4"
 maud = { version = "0.27", features = ["axum"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "fs"] }
+tokio-util = { version = "0.7", features = ["io"] }
 
 [dev-dependencies]
 tempfile = "3"

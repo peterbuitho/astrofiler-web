@@ -16,6 +16,21 @@ pub struct Filter {
     pub desc: bool,
 }
 
+/// Whether a comparison key looks like a catalogue number: M76, NGC7000, C36.
+fn is_designation(key: &str) -> bool {
+    const CATALOGUES: [&str; 14] = [
+        "M", "NGC", "IC", "C", "SH2", "LDN", "LBN", "B", "ABELL", "VDB", "PGC", "UGC", "MEL", "CR",
+    ];
+    let digits = key.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+    let prefix = &key[..key.len() - digits.len()];
+    CATALOGUES.contains(&prefix)
+        && digits.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && digits
+            .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+            .chars()
+            .all(|c| c.is_ascii_digit())
+}
+
 /// Indexes into `files` of the files that match, in display order.
 pub fn apply(
     files: &[FitsFile],
@@ -45,6 +60,18 @@ pub fn apply(
                     object = Some(k);
                     terms.drain(..n);
                     break;
+                }
+            }
+            // A catalogue designation that is not in the repository ("C 36")
+            // matches nothing, instead of falling back to loose word matching.
+            if object.is_none() {
+                for n in 1..=terms.len().min(2) {
+                    let k = names::key(&terms[..n].join(" "));
+                    if is_designation(&k) {
+                        object = Some(k);
+                        terms.drain(..n);
+                        break;
+                    }
                 }
             }
             (object, terms)
@@ -147,6 +174,10 @@ mod tests {
         assert_eq!(run("m7", "all"), vec![1]);
         assert_eq!(run("M 76, ngc281 ha", "all"), vec![0, 2]);
         assert_eq!(run("barbell", "all"), vec![0]);
+        // An object that is not catalogued finds nothing, not random files.
+        assert!(run("c36", "all").is_empty());
+        assert!(run("C 36", "all").is_empty());
+        assert!(run("ngc 7000 ha", "all").is_empty());
         assert_eq!(run("", "calibration"), vec![3]);
         assert_eq!(run("", "light").len(), 3);
     }

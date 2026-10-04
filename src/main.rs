@@ -264,16 +264,32 @@ mod tests {
         frame(&inbox, "b.fits", "M 31", "2026-09-01T21:01:00");
         frame(&inbox, "c.fits", "M 76", "2026-09-02T21:00:00");
 
-        let form = format!(
-            "folder={}&placement=move&quick=1&on_conflict=skip",
-            inbox.display()
-        );
+        let form = format!("folder={}&placement=move&on_conflict=skip", inbox.display());
         assert_eq!(post(&app, "/load", &form).await, StatusCode::SEE_OTHER);
         wait_idle(&app).await;
-        // The load, then the checksums it left to fill in.
         let files = db::all_files(&app.conn().unwrap(), false).unwrap();
         assert_eq!(files.len(), 3);
         assert!(files.iter().all(|f| f.hash.is_some()));
+
+        // The same frame again: it stays in the folder unless asked to go.
+        let again = tmp.path().join("astro/again");
+        frame(&again, "a.fits", "M 31", "2026-09-01T21:00:00");
+        let form = |extra: &str| {
+            format!(
+                "folder={}&placement=move&on_conflict=skip{extra}",
+                again.display()
+            )
+        };
+        assert_eq!(post(&app, "/load", &form("")).await, StatusCode::SEE_OTHER);
+        wait_idle(&app).await;
+        assert!(again.join("a.fits").exists());
+        assert_eq!(
+            post(&app, "/load", &form("&remove_known=1")).await,
+            StatusCode::SEE_OTHER
+        );
+        wait_idle(&app).await;
+        assert!(!again.join("a.fits").exists());
+        assert_eq!(db::all_files(&app.conn().unwrap(), false).unwrap().len(), 3);
 
         let (status, rows) = get(&app, "/images/rows?q=m31").await;
         assert_eq!(status, StatusCode::OK);
@@ -284,15 +300,57 @@ mod tests {
             "{rows}"
         );
 
-        // Everything the search matches, without ticking rows.
+        // The advanced SQL condition narrows the search; a bad one is reported.
+        let (_, rows) = get(&app, "/images/rows?sql=fitsFileObject%20%3D%20%27M%2076%27").await;
+        assert!(rows.contains("1 files"), "{rows}");
+        let (_, rows) = get(&app, "/images/rows?sql=nonsense%20%3D%20").await;
+        assert!(rows.contains("SQL:"), "{rows}");
+        let (_, rows) = get(&app, "/images/rows?sql=1%3D1%3B%20DROP%20TABLE%20fitsFile").await;
+        assert!(rows.contains("SQL:"), "{rows}");
+        assert_eq!(db::all_files(&app.conn().unwrap(), false).unwrap().len(), 3);
+        // Grouped: one row per object, its files fetched when it is opened.
+        let (_, rows) = get(&app, "/images/rows?group=object").await;
+        assert!(rows.contains("3 files in 2 groups"), "{rows}");
+        assert!(rows.contains("Total (2 groups)"), "{rows}");
+        assert!(!rows.contains("name=\"id\""), "{rows}");
+        let (_, rows) = get(&app, "/images/rows?group=object&key=M%2031").await;
+        assert_eq!(rows.matches("name=\"id\"").count(), 2, "{rows}");
+        let (_, rows) = get(&app, "/images/rows?group=date&key=2026-09-02").await;
+        assert_eq!(rows.matches("name=\"id\"").count(), 1, "{rows}");
+
+        // Removing from the catalogue leaves the file on disk.
+        let m76 = db::all_files(&app.conn().unwrap(), false)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.object.as_deref() == Some("M 76"))
+            .unwrap();
+        let body = format!("id={}", m76.id);
         assert_eq!(
-            post(&app, "/images/delete", "all=1&q=m31&kind=all").await,
+            post(&app, "/images/remove", &body).await,
+            StatusCode::SEE_OTHER
+        );
+        wait_idle(&app).await;
+        assert_eq!(db::all_files(&app.conn().unwrap(), false).unwrap().len(), 2);
+        assert!(std::path::Path::new(&m76.name).exists());
+
+        // Everything the search matches, without ticking rows.
+        // Not without the typed confirmation.
+        post(&app, "/images/delete", "all=1&q=m31&kind=all").await;
+        wait_idle(&app).await;
+        assert_eq!(db::all_files(&app.conn().unwrap(), false).unwrap().len(), 2);
+        assert_eq!(
+            post(
+                &app,
+                "/images/delete",
+                "grp=M%2031&group=object&kind=all&confirm=DELETE"
+            )
+            .await,
             StatusCode::SEE_OTHER
         );
         wait_idle(&app).await;
         let left = db::all_files(&app.conn().unwrap(), false).unwrap();
-        assert_eq!(left.len(), 1);
-        assert_eq!(left[0].object.as_deref(), Some("M 76"));
+        assert!(left.is_empty());
+        // Only the file that was removed from the catalogue is still there.
         let on_disk = astrofiler::ingest::collect_files(&tmp.path().join("astro/repo"), &[]);
         assert_eq!(on_disk.len(), 1, "{on_disk:?}");
     }
@@ -331,5 +389,32 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(send(&app, req).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn merge_into_an_object_that_has_the_same_frames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let inbox = tmp.path().join("astro/inbox");
+        frame(&inbox.join("0"), "a.fits", "NGC 281", "2026-09-01T21:00:00");
+        frame(&inbox.join("1"), "a.fits", "NGC281", "2026-09-01T21:00:00");
+        let form = format!("folder={}&placement=move&on_conflict=skip", inbox.display());
+        post(&app, "/load", &form).await;
+        wait_idle(&app).await;
+
+        post(
+            &app,
+            "/batch/merge",
+            "from=NGC281&to=NGC%20281&headers=1&refile=1",
+        )
+        .await;
+        wait_idle(&app).await;
+        // Both frames are kept; the summary says where the moved one went.
+        let files = db::all_files(&app.conn().unwrap(), false).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|f| std::path::Path::new(&f.name).exists()));
+        let (_, jobs) = get(&app, "/jobs").await;
+        assert!(jobs.contains("NGC_281_Pacman_Nebula"), "{jobs}");
+        assert!(jobs.contains("1 are copies"), "{jobs}");
     }
 }

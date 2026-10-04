@@ -31,9 +31,66 @@ function toggleAll(c) {
   document.querySelectorAll('input.row').forEach(b => b.checked = c.checked);
   countSelected();
 }
+// A ticked group counts all its files, whether or not they are shown.
 function countSelected() {
-  const n = document.querySelectorAll('input.row:checked').length;
+  let n = 0;
+  document.querySelectorAll('input.row:checked').forEach(b => {
+    if (b.classList.contains('grp')) n += +b.dataset.n;
+    else if (!memberOfTickedGroup(b)) n += 1;
+  });
   if (el('selcount')) el('selcount').textContent = n + ' selected';
+}
+function groupBoxOf(box) {
+  const m = box.closest('tr.members');
+  return m ? m.previousElementSibling.querySelector('input.grp') : null;
+}
+function memberOfTickedGroup(box) {
+  const g = groupBoxOf(box);
+  return g && g.checked;
+}
+
+// Images, grouped: a group row is followed by a hidden row for its files,
+// which are fetched the first time it is opened.
+function toggleGroup(tr, open) {
+  const m = tr.nextElementSibling;
+  if (open === undefined) open = m.hidden;
+  m.hidden = !open;
+  tr.querySelector('.arrow').textContent = open ? '▾' : '▸';
+  if (open) htmx.trigger(m.lastElementChild, 'expand');
+}
+function expandAll(open) {
+  document.querySelectorAll('tr.group').forEach(tr => toggleGroup(tr, open));
+}
+function toggleGroupBox(g) {
+  g.closest('tr').nextElementSibling.querySelectorAll('input.row').forEach(b => b.checked = g.checked);
+  countSelected();
+}
+// Unticking one file of a ticked group leaves the rest of it selected.
+document.addEventListener('change', e => {
+  const c = e.target;
+  if (!c.matches || !c.matches('tr.members input.row')) return;
+  const g = groupBoxOf(c);
+  if (g && g.checked && !c.checked) {
+    g.checked = false;
+    c.closest('tr.members').querySelectorAll('input.row').forEach(b => { if (b !== c) b.checked = true; });
+  }
+  countSelected();
+});
+// Files of a ticked group arrive ticked.
+document.addEventListener('htmx:afterSwap', e => {
+  const m = e.target.closest && e.target.closest('tr.members');
+  const g = m && m.previousElementSibling.querySelector('input.grp');
+  if (g && g.checked) m.querySelectorAll('input.row').forEach(b => b.checked = true);
+});
+// Deleting from disk can't be undone: ask for the word, not just a click.
+function confirmDelete() {
+  if (!needSelection()) return false;
+  const n = el('all').checked ? 'ALL matching' : parseInt(el('selcount').textContent);
+  const typed = prompt('Permanently delete ' + n + ' files from disk?\n\nThis cannot be undone. Type DELETE to confirm.');
+  if (typed === null) return false;
+  if (typed.trim() !== 'DELETE') { alert('Nothing deleted: you did not type DELETE.'); return false; }
+  el('confirm').value = 'DELETE';
+  return true;
 }
 function needSelection() {
   if (el('all').checked || document.querySelector('input.row:checked')) return true;
@@ -46,6 +103,7 @@ document.addEventListener('htmx:afterSwap', countSelected);
 document.addEventListener('keydown', e => {
   if (e.key !== 'Enter' || !e.target.matches || !e.target.matches('#sel input')) return;
   e.preventDefault();
+  if (e.target.id === 'sql') return reload(0);
   const d = e.target.closest('dialog');
   if (d) d.querySelector('button[formaction]').click();
 });

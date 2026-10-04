@@ -12,14 +12,14 @@ layout and settings file are the same as the desktop app's.
 
 | Page | |
 |---|---|
-| Images | Search, filter, sort; edit a header field, export, remove or delete the selected files |
-| Load | File a folder into the repository (move, copy or catalogue in place); sync the repository |
+| Images | Search (plus an advanced SQLite condition), filter, sort, group by object or date; open a file, edit a header field, export, remove from the catalogue or delete from disk (typed confirmation) |
+| Load | File a folder into the repository (move, copy or catalogue in place), optionally deleting originals already filed; sync the repository |
 | Sessions | Create, clear and export sessions |
-| Batch | Merge objects, verify, fill in checksums, regenerate, folder layout, clean previews |
+| Batch | Merge objects, verify, regenerate, folder layout, clean previews |
 | Duplicates | Identical files, and deleting the extra copies |
 | Mappings | Header values rewritten on import |
-| Statistics | Totals and integration time by object, filter, telescope and camera |
-| Settings | Repository, incoming folder, conflicts, object names |
+| Statistics | Totals and integration time by object, filter, telescope and camera; names that are the same device are added up (configurable) |
+| Settings | Repository, incoming folder, conflicts, object names, statistics names |
 | Log | The latest log lines |
 
 Telescope import and image preview are not here; use the desktop app for
