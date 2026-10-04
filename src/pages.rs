@@ -221,7 +221,8 @@ struct RowsQuery {
 fn group_key(f: &FitsFile, by: &str) -> String {
     match by {
         "date" => opt(&f.date).chars().take(10).collect(),
-        _ => opt(&f.object).to_string(),
+        // The panels of a mosaic ("HD 199479(1)") are one group.
+        _ => names::mosaic(opt(&f.object)).0,
     }
 }
 
@@ -249,6 +250,8 @@ struct Group {
     last: String,
     /// Filters when grouped by object, objects when grouped by date.
     others: std::collections::BTreeSet<String>,
+    /// Panel numbers, when the group is a mosaic.
+    panels: std::collections::BTreeSet<u32>,
 }
 
 enum Rows {
@@ -318,7 +321,11 @@ async fn image_rows(State(app): State<App>, Query(query): Query<RowsQuery>) -> P
                 first: String::new(),
                 last: String::new(),
                 others: Default::default(),
+                panels: Default::default(),
             });
+            if let (true, Some(n)) = (by != "date", names::mosaic(opt(&file.object)).1) {
+                g.panels.insert(n);
+            }
             g.files += 1;
             g.seconds += file
                 .exptime
@@ -404,6 +411,9 @@ async fn image_rows(State(app): State<App>, Query(query): Query<RowsQuery>) -> P
                                         @if g.key.is_empty() { "(none)" } @else { (g.key) }
                                         @if by != "date" {
                                             @if let Some(n) = names::common_name(&g.key, &names) { " " span class="muted" { (n) } }
+                                            @if !g.panels.is_empty() {
+                                                " " span class="muted" { "· mosaic, " (g.panels.len()) " panels" }
+                                            }
                                         }
                                     }
                                     td { (g.files) }
@@ -1391,8 +1401,20 @@ async fn stats_fresh(State(app): State<App>) -> Page {
     let a = app.clone();
     let s = blocking(move || stats::compute(&a.conn()?)).await?;
     let cfg = app.cfg();
-    let by_object: Vec<(String, f64)> = s
-        .by_object
+    // The panels of a mosaic are one object here.
+    let mut objects: Vec<(String, usize, f64)> = Vec::new();
+    for (o, n, e) in &s.by_object {
+        let o = names::mosaic(o).0;
+        match objects.iter_mut().find(|(name, _, _)| *name == o) {
+            Some(row) => {
+                row.1 += n;
+                row.2 += e;
+            }
+            None => objects.push((o, *n, *e)),
+        }
+    }
+    objects.sort_by(|a, b| b.2.total_cmp(&a.2));
+    let by_object: Vec<(String, f64)> = objects
         .iter()
         .map(|(o, n, e)| {
             let label = match names::common_name(o, &cfg.object_names) {

@@ -48,7 +48,11 @@ pub fn apply(
     // either. A part starting with an object ("M 76", "m76", "NGC 7000
     // Ha") shows exactly that object; matching "m" and "76" as separate
     // words would also find every file with 76 in its time or temperature.
-    let object_keys: HashSet<String> = common.keys().map(|o| names::key(o)).collect();
+    // A mosaic is found by its own name as well as by each panel's.
+    let object_keys: HashSet<String> = common
+        .keys()
+        .flat_map(|o| [names::key(o), names::key(&names::mosaic(o).0)])
+        .collect();
     let clauses: Vec<(Option<String>, Vec<&str>)> = q
         .split(',')
         .map(|part| {
@@ -92,6 +96,7 @@ pub fn apply(
             type_ok && {
                 let object = file.object.as_deref().unwrap_or("");
                 let key = names::key(object);
+                let mosaic = names::key(&names::mosaic(object).0);
                 let hay = format!(
                     "{} {} {} {} {} {} {}",
                     object,
@@ -105,7 +110,7 @@ pub fn apply(
                 .to_lowercase();
                 clauses.is_empty()
                     || clauses.iter().any(|(o, terms)| {
-                        o.as_ref().is_none_or(|k| *k == key)
+                        o.as_ref().is_none_or(|k| *k == key || *k == mosaic)
                             && terms.iter().all(|t| hay.contains(t))
                     })
             }
@@ -160,6 +165,8 @@ mod tests {
             file("M 7", "LIGHT", "LP", "2026-09-02T22:00:00"),
             file("NGC 281", "LIGHT", "Ha", "2026-07-06T22:00:00"),
             file("Dark", "DARK", "", "2026-09-03T22:00:00"),
+            file("HD 199479(1)", "LIGHT", "LP", "2026-09-09T22:00:00"),
+            file("HD 199479(2)", "LIGHT", "LP", "2026-09-09T23:00:00"),
         ];
         let names = BTreeMap::new();
         let run = |q: &str, kind: &str| {
@@ -179,6 +186,9 @@ mod tests {
         assert!(run("C 36", "all").is_empty());
         assert!(run("ngc 7000 ha", "all").is_empty());
         assert_eq!(run("", "calibration"), vec![3]);
-        assert_eq!(run("", "light").len(), 3);
+        assert_eq!(run("", "light").len(), 5);
+        // A mosaic's name finds all its panels; a panel's name just that one.
+        assert_eq!(run("hd 199479", "all"), vec![4, 5]);
+        assert_eq!(run("HD 199479(2)", "all"), vec![5]);
     }
 }

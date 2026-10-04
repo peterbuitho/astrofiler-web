@@ -527,6 +527,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mosaic_panels_are_one_group_with_a_folder_each() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let inbox = tmp.path().join("inbox");
+        frame(&inbox, "a.fits", "HD 199479(1)", "2026-09-09T22:00:00");
+        frame(&inbox, "b.fits", "HD 199479(2)", "2026-09-09T23:00:00");
+        let form = format!("folder={}&placement=move&on_conflict=skip", inbox.display());
+        assert_eq!(post(&app, "/load", &form).await, StatusCode::SEE_OTHER);
+        wait_idle(&app).await;
+        let files = db::all_files(&app.conn().unwrap(), false).unwrap();
+        for (f, n) in files.iter().zip([1, 2]) {
+            let dir = format!("/Light/HD_199479/RedCat_51/ASI2600/Panel_{n}/20260909/");
+            assert!(f.name.contains(&dir), "{}", f.name);
+        }
+        let (_, rows) = get(&app, "/images/rows?group=object").await;
+        assert!(rows.contains("2 files in 1 groups"), "{rows}");
+        assert!(rows.contains("mosaic, 2 panels"), "{rows}");
+        // The group opens to both panels; searching one panel finds just it.
+        let (_, rows) = get(&app, "/images/rows?group=object&key=HD%20199479").await;
+        assert!(rows.contains("HD 199479(1)") && rows.contains("HD 199479(2)"));
+        let (_, rows) = get(&app, "/images/rows?q=HD%20199479(2)").await;
+        assert!(rows.contains("1 files"), "{rows}");
+        let (_, stats) = get(&app, "/stats/fresh").await;
+        assert!(stats.contains("HD 199479 (2)"), "{stats}");
+    }
+
+    #[tokio::test]
     async fn nickname_from_a_picture_renames_the_folder() {
         let tmp = tempfile::tempdir().unwrap();
         let app = test_app(tmp.path(), None);
