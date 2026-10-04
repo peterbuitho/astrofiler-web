@@ -111,7 +111,11 @@ impl Jobs {
             lower_priority();
             let cfg = jobs.0.cfg.read().unwrap().clone();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                db::open(&jobs.0.db_path).and_then(|mut conn| work(&mut conn, &cfg, &state))
+                db::open(&jobs.0.db_path).and_then(|mut conn| {
+                    let mut cfg = cfg;
+                    crate::nick::merge(&mut cfg, crate::nick::load(&conn));
+                    work(&mut conn, &cfg, &state)
+                })
             }))
             .unwrap_or_else(|panic| {
                 let msg = panic

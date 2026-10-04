@@ -3,6 +3,7 @@
 
 mod filter;
 mod jobs;
+mod nick;
 mod pages;
 mod ui;
 
@@ -47,7 +48,19 @@ impl AppState {
         })
     }
 
+    /// The settings, with the nicknames from the catalogue among the object
+    /// names.
     pub fn cfg(&self) -> Config {
+        let mut cfg = self.cfg_saved();
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+        if let Ok(conn) = rusqlite::Connection::open_with_flags(&self.db_path, flags) {
+            nick::merge(&mut cfg, nick::load(&conn));
+        }
+        cfg
+    }
+
+    /// The settings as they are in the settings file.
+    pub fn cfg_saved(&self) -> Config {
         self.cfg.read().unwrap().clone()
     }
 
@@ -458,7 +471,12 @@ mod tests {
         let files = db::all_files(&app.conn().unwrap(), false).unwrap();
         assert_eq!(files.len(), 3);
         for f in &files {
-            assert!(f.name.contains("/repo/Light/C_7"), "{}", f.name);
+            // The folder's nickname is kept in the object's folder name.
+            assert!(
+                f.name.contains("/repo/Light/C_7_Spiral_Galaxy/"),
+                "{}",
+                f.name
+            );
             assert!(std::path::Path::new(&f.name).exists(), "{}", f.name);
         }
         assert!(!old.join("a.fits").exists());
@@ -473,5 +491,42 @@ mod tests {
         assert!(folder.join("Stacked_778_C 7_thn.jpg").exists());
         assert!(old.join("Light_C 7_20.0s.jpg").exists());
         assert!(old.join("a.jpg").exists());
+        let names = app.cfg().object_names;
+        assert_eq!(names.get("C 7").map(String::as_str), Some("Spiral Galaxy"));
+    }
+
+    #[tokio::test]
+    async fn nickname_from_a_picture_renames_the_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let inbox = tmp.path().join("inbox");
+        frame(&inbox, "a.fits", "C 36", "2026-01-20T01:00:00");
+        let form = format!("folder={}&placement=move&on_conflict=skip", inbox.display());
+        assert_eq!(post(&app, "/load", &form).await, StatusCode::SEE_OTHER);
+        wait_idle(&app).await;
+        let dir = tmp.path().join("astro/repo/Light/C_36");
+        assert!(dir.is_dir());
+        std::fs::write(dir.join("C 36 Koi Fish Galaxy.png"), b"picture").unwrap();
+
+        let status = post(&app, "/batch/run", "action=layout_migrate").await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        wait_idle(&app).await;
+        let new = tmp.path().join("astro/repo/Light/C_36_Koi_Fish_Galaxy");
+        let files = db::all_files(&app.conn().unwrap(), false).unwrap();
+        assert!(
+            files[0].name.starts_with(&*new.to_string_lossy()),
+            "{}",
+            files[0].name
+        );
+        assert!(new.join("C 36 Koi Fish Galaxy.png").exists());
+        assert!(!dir.exists());
+
+        // A nickname removed on the Settings page is not used any more.
+        let form = format!(
+            "repo={}&on_conflict=skip&nicknames=",
+            tmp.path().join("astro/repo").display()
+        );
+        assert_eq!(post(&app, "/settings", &form).await, StatusCode::SEE_OTHER);
+        assert!(app.cfg().object_names.is_empty());
     }
 }

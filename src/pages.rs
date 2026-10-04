@@ -2,7 +2,7 @@
 
 use crate::filter::{self, Filter};
 use crate::ui::{folder_input, jobs_panel, opt, page};
-use crate::{blocking, App, AppError};
+use crate::{blocking, nick, App, AppError};
 use astrofiler::batch::{self, EditOptions, EditReport, ExportLayout};
 use astrofiler::db::{self, FitsFile};
 use astrofiler::ingest::{self, IngestOptions, OnConflict, Placement};
@@ -35,6 +35,7 @@ Examples:\n\
   fitsFileHash IS NULL\n\
   fitsFileName LIKE '%/Light/%' AND fitsFileStacked = 0\n\
   fitsFileObject IN (SELECT fitsFileObject FROM fitsFile GROUP BY fitsFileObject HAVING count(*) > 50)\n\
+  fitsFileObject IN (SELECT object FROM objectNickname WHERE nickname LIKE '%galaxy%')\n\
 \n\
 Columns: fitsFileName, fitsFileDate, fitsFileType, fitsFileStacked, fitsFileObject, fitsFileExpTime (text: use CAST(.. AS REAL)), \
 fitsFileXBinning, fitsFileYBinning, fitsFileCCDTemp, fitsFileTelescop, fitsFileInstrument, fitsFileGain, fitsFileOffset, \
@@ -765,6 +766,17 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
             // Files a sync catalogued where they lie would be taken for
             // "loaded before" and left there. Forget them first, so the move
             // files them like new ones.
+            // The folder and the pictures in it may give the object a
+            // nickname, which then goes into the name of its folder.
+            let mut cfg = cfg.clone();
+            let mut found: Vec<String> = src
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .into_iter()
+                .collect();
+            nick::names_under(&src, 3, &is_picture, &mut found);
+            let learned = nick::learn(conn, &mut cfg, found, opts.dry_run);
+            let cfg = &cfg;
             let mut refiled = 0;
             if opts.placement == Placement::Move && !opts.dry_run {
                 refiled = forget_unfiled(conn, cfg, &src)?;
@@ -792,6 +804,9 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
                 );
             }
             let mut summary = r.summary();
+            if !learned.is_empty() {
+                summary.push_str(&format!(", {} nicknames learned", learned.len()));
+            }
             // Moving a file that is already filed leaves the original in
             // place; delete it only if the repository copy is really there.
             let mut removed = 0;
@@ -1013,12 +1028,70 @@ fn forget_unfiled(
     Ok(n)
 }
 
+/// The settings with the nicknames found in the repository: in the names of
+/// the folders next to the managed ones, of the object folders and of the
+/// processed pictures filed with the frames.
+fn learn_from_repo(
+    conn: &rusqlite::Connection,
+    cfg: &astrofiler::config::Config,
+) -> astrofiler::config::Config {
+    let mut cfg = cfg.clone();
+    let mut found = Vec::new();
+    nick::names_under(&cfg.repo, 0, &is_picture, &mut found);
+    for top in ["Light", "Stacked"] {
+        nick::names_under(&cfg.repo.join(top), 3, &is_picture, &mut found);
+    }
+    nick::learn(conn, &mut cfg, found, false);
+    cfg
+}
+
+/// After frames moved to a renamed folder, the processed pictures filed next
+/// to them go along, under their own names.
+fn pictures_follow(cfg: &astrofiler::config::Config, moved: &[(PathBuf, PathBuf)]) {
+    let mut dirs: std::collections::BTreeSet<(PathBuf, PathBuf)> = Default::default();
+    for (old, new) in moved {
+        // Folders pair up level by level only when the depth is unchanged.
+        let levels = if old.components().count() == new.components().count() {
+            4
+        } else {
+            1
+        };
+        for (a, b) in old.ancestors().zip(new.ancestors()).skip(1).take(levels) {
+            if a == b {
+                break;
+            }
+            dirs.insert((a.to_path_buf(), b.to_path_buf()));
+        }
+    }
+    for (old, new) in dirs {
+        let Ok(entries) = std::fs::read_dir(&old) else {
+            continue;
+        };
+        for p in entries.flatten().map(|e| e.path()) {
+            let Some(name) = p.file_name() else { continue };
+            let to = new.join(name);
+            if !p.is_file() || !is_picture(&p) {
+                continue;
+            }
+            if to.exists() {
+                log::warn!("{}: left, {} exists", p.display(), to.display());
+            } else if let Err(e) = util::move_file(&p, &to) {
+                log::warn!("{}: not moved ({e})", p.display());
+            }
+        }
+    }
+    for top in ["Light", "Stacked"] {
+        batch::remove_empty_dirs(&cfg.repo.join(top));
+    }
+}
+
 fn paths_same(a: &Path, b: &Path) -> bool {
     matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
 async fn sync(State(app): State<App>) -> Redirect {
     app.jobs.spawn("Sync repository", |conn, cfg, p| {
+        let cfg = &learn_from_repo(conn, cfg);
         Ok(ingest::ingest_folder(conn, cfg, &cfg.repo, IngestOptions::IN_PLACE, p)?.summary())
     });
     Redirect::to("/images")
@@ -1317,6 +1390,7 @@ async fn batch_run(State(app): State<App>, Form(f): Form<RunForm>) -> Redirect {
             ))
         }),
         "regenerate" => jobs.spawn("Regenerate", |conn, cfg, p| {
+            let cfg = &learn_from_repo(conn, cfg);
             Ok(batch::regenerate(conn, cfg, p)?.summary())
         }),
         "layout_check" => jobs.spawn_read("Check folders", |conn, cfg, _| {
@@ -1326,10 +1400,12 @@ async fn batch_run(State(app): State<App>, Form(f): Form<RunForm>) -> Redirect {
             ))
         }),
         "layout_migrate" => jobs.spawn("Update folders", |conn, cfg, p| {
+            let cfg = &learn_from_repo(conn, cfg);
             let r = batch::migrate_layout(conn, cfg, false, p)?;
             for (f, e) in &r.errors {
                 log::warn!("Not moved: {} ({e})", f.display());
             }
+            pictures_follow(cfg, &r.moved);
             Ok(format!(
                 "{} files moved to the current layout{}",
                 r.moved.len(),
@@ -1596,7 +1672,14 @@ async fn stats_page(State(app): State<App>) -> Page {
 // ---------------------------------------------------------------- Settings
 
 async fn settings(State(app): State<App>) -> Markup {
-    let c = app.cfg();
+    let c = app.cfg_saved();
+    let nicknames: String = app
+        .conn()
+        .map(|conn| nick::load(&conn))
+        .unwrap_or_default()
+        .iter()
+        .map(|(o, n)| format!("{o} = {n}\n"))
+        .collect();
     let object_names: String = c
         .object_names
         .iter()
@@ -1623,6 +1706,11 @@ async fn settings(State(app): State<App>) -> Markup {
                 div {
                     p class="muted" { "Well-known objects get their common name in the folder name, e.g. Light/M_76_Barbell_Nebula. Add names here, or change a built-in one, one per line as \"M 76 = Barbell Nebula\". Leave the name empty to use just the catalogue number." }
                     textarea name="object_names" rows="8" cols="50" { (object_names) }
+                }
+                label { "Nicknames" }
+                div {
+                    p class="muted" { "Names you gave objects yourself. They are picked up from the folder you load and the pictures in it (\"C 7 Spiral Galaxy\"), for objects that have no name above or built in, and are kept in the catalogue. Correct them here; to stop using one, add the object with an empty name (\"C 7 =\") to the object names above." }
+                    textarea name="nicknames" rows="8" cols="50" { (nicknames) }
                     p class="muted" { "After saving, use Batch > Folder layout to rename existing folders." }
                 }
                 label { "Statistics names" }
@@ -1646,23 +1734,30 @@ struct SettingsForm {
     save_modified_headers: Option<String>,
     on_conflict: String,
     object_names: String,
+    nicknames: String,
     stats_names: String,
 }
 
 async fn settings_save(State(app): State<App>, Form(f): Form<SettingsForm>) -> Redirect {
-    let mut c = app.cfg();
+    let mut c = app.cfg_saved();
     c.repo = PathBuf::from(f.repo.trim());
     c.source = PathBuf::from(f.source.trim());
     c.save_modified_headers = ticked(&f.save_modified_headers);
     c.on_conflict = OnConflict::parse(&f.on_conflict).unwrap_or(c.on_conflict);
-    c.object_names = f
-        .object_names
-        .lines()
-        .filter_map(|l| l.split_once('='))
-        .map(|(o, n)| (o.trim().to_string(), n.trim().to_string()))
-        .filter(|(o, _)| !o.is_empty())
+    let pairs = |text: &str| -> Vec<(String, String)> {
+        text.lines()
+            .filter_map(|l| l.split_once('='))
+            .map(|(o, n)| (o.trim().to_string(), n.trim().to_string()))
+            .filter(|(o, _)| !o.is_empty())
+            .collect()
+    };
+    c.object_names = pairs(&f.object_names).into_iter().collect();
+    let nicknames: Vec<_> = pairs(&f.nicknames)
+        .into_iter()
+        .filter(|(_, n)| !n.is_empty())
         .collect();
     let saved = c.save().and_then(|()| {
+        nick::replace(&mut app.conn()?, &nicknames)?;
         let text = f.stats_names.replace("\r\n", "\n");
         Ok(std::fs::write(stats_names_path(&app), text)?)
     });
