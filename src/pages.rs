@@ -811,6 +811,14 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
             if removed > 0 {
                 summary.push_str(&format!(", {removed} originals deleted"));
             }
+            // Deleting the originals may have emptied the folder.
+            if opts.placement == Placement::Move && !opts.dry_run {
+                let more = batch::prune_source(cfg, &src);
+                if more > 0 {
+                    let also = if r.folders_removed > 0 { "more " } else { "" };
+                    summary.push_str(&format!(", {more} {also}empty folders removed"));
+                }
+            }
             Ok(summary)
         }),
     );

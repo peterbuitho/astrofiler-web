@@ -305,12 +305,16 @@ mod tests {
         assert_eq!(post(&app, "/load", &form("")).await, StatusCode::SEE_OTHER);
         wait_idle(&app).await;
         assert!(again.join("a.fits").exists());
+        // The folder stays while something is in it.
+        assert!(again.is_dir());
         assert_eq!(
             post(&app, "/load", &form("&remove_known=1")).await,
             StatusCode::SEE_OTHER
         );
         wait_idle(&app).await;
         assert!(!again.join("a.fits").exists());
+        // Nothing left in it: the folder goes too.
+        assert!(!again.exists());
         assert_eq!(db::all_files(&app.conn().unwrap(), false).unwrap().len(), 3);
 
         let (status, rows) = get(&app, "/images/rows?q=m31").await;
