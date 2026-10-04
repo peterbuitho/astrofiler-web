@@ -332,6 +332,11 @@ mod tests {
         assert!(rows.contains("SQL:"), "{rows}");
         assert_eq!(db::all_files(&app.conn().unwrap(), false).unwrap().len(), 3);
         // Grouped: one row per object, its files fetched when it is opened.
+        // What narrow screens need: columns they can leave out, help without hover.
+        let (_, plain) = get(&app, "/images/rows").await;
+        assert!(plain.contains("class=\"c3\"") && plain.contains("class=\"c2 file link\""));
+        let (_, images) = get(&app, "/images").await;
+        assert!(images.contains("id=\"sqlhelp\""));
         let (_, rows) = get(&app, "/images/rows?group=object").await;
         assert!(rows.contains("3 files in 2 groups"), "{rows}");
         assert!(rows.contains("Total (2 groups)"), "{rows}");
@@ -493,6 +498,29 @@ mod tests {
         assert!(old.join("a.jpg").exists());
         let names = app.cfg().object_names;
         assert_eq!(names.get("C 7").map(String::as_str), Some("Spiral Galaxy"));
+    }
+
+    #[tokio::test]
+    async fn statistics_show_the_last_numbers_while_recalculating() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let inbox = tmp.path().join("inbox");
+        frame(&inbox, "a.fits", "M 31", "2026-01-20T01:00:00");
+        let form = format!("folder={}&placement=move&on_conflict=skip", inbox.display());
+        assert_eq!(post(&app, "/load", &form).await, StatusCode::SEE_OTHER);
+        wait_idle(&app).await;
+        let (_, first) = get(&app, "/stats").await;
+        assert!(first.contains("Calculating") && !first.contains("Integration by object"));
+        let (_, fresh) = get(&app, "/stats/fresh").await;
+        assert!(
+            fresh.contains("M 31") && !fresh.contains("hx-get"),
+            "{fresh}"
+        );
+        let (_, again) = get(&app, "/stats").await;
+        assert!(
+            again.contains("Recalculating") && again.contains("M 31"),
+            "{again}"
+        );
     }
 
     #[tokio::test]

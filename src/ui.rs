@@ -25,6 +25,9 @@ pub fn page(app: &AppState, active: &str, live: bool, body: Markup) -> Markup {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
+                meta name="theme-color" content="#1b1c1f";
+                meta name="mobile-web-app-capable" content="yes";
+                meta name="apple-mobile-web-app-capable" content="yes";
                 title { "AstroFiler" }
                 link rel="stylesheet" href="/assets/style.css";
                 script src="/assets/htmx.js" {}

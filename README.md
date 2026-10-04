@@ -22,6 +22,9 @@ layout and settings file are the same as the desktop app's.
 | Settings | Repository, incoming folder, conflicts, object names, nicknames, statistics names |
 | Log | The latest log lines |
 
+The pages adapt to the screen: the full tables on a desktop, fewer columns
+and finger-sized controls on a tablet or phone.
+
 Telescope import and image preview are not here; use the desktop app for
 those, then copy the files to the incoming folder on the NAS and load them.
 
@@ -77,9 +80,9 @@ The AstroFiler library comes from GitHub at the commit in `Cargo.lock`;
 
 ## Release
 
-Push a version tag (`git tag v0.3.2 && git push origin v0.3.2`) and the
+Push a version tag (`git tag v0.3.3 && git push origin v0.3.3`) and the
 GitHub Action in `.github/workflows/docker.yml` runs the tests, builds the
-image for amd64 and pushes `ntmb/astrofiler-web:0.3.2` and
+image for amd64 and pushes `ntmb/astrofiler-web:0.3.3` and
 `:latest` to Docker Hub. It needs two repository secrets (Settings > Secrets
 and variables > Actions): `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (an
 access token with write permission, made at hub.docker.com > Account settings

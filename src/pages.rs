@@ -90,6 +90,7 @@ pub fn routes() -> Router<App> {
         .route("/mappings/add", post(mappings_add))
         .route("/mappings/remove", post(mappings_remove))
         .route("/stats", get(stats_page))
+        .route("/stats/fresh", get(stats_fresh))
         .route("/settings", get(settings).post(settings_save))
         .route("/log", get(log_page))
         .route("/log/lines", get(log_lines))
@@ -138,10 +139,11 @@ async fn images(State(app): State<App>) -> Markup {
                 input type="text" id="sql" name="sql" size="60" class="sql"
                     placeholder="Advanced: SQL condition, e.g. fitsFileObject LIKE 'M%' AND CAST(fitsFileExpTime AS REAL) >= 120"
                     title=(SQL_HELP);
+                button type="button" onclick="dlg('sqlhelp')" title="SQL examples" { "?" }
                 label { "Group by "
                     select id="group" name="group" onchange="el('page').value=0" {
                         option value="" { "Nothing" }
-                        option value="object" { "Object" }
+                        option value="object" selected { "Object" }
                         option value="date" { "Date" }
                     }
                 }
@@ -159,12 +161,16 @@ async fn images(State(app): State<App>) -> Markup {
                     onclick="return needSelection()&&confirm('Remove the selected files from the catalogue? The files stay on disk.')"
                     { "Remove from catalogue (keep files)" }
                 input type="hidden" id="confirm" name="confirm" value="";
-                button class="danger" style="margin-left: auto" formaction="/images/delete"
+                button class="danger apart" formaction="/images/delete"
                     onclick="return confirmDelete()"
                     { "Delete files from disk…" }
             }
             div id="rows" hx-get="/images/rows" hx-include="#q,#sql,#kind,#group,#sort,#desc,#page"
                 hx-trigger="load, input changed delay:300ms from:#q, change from:#kind, change from:#group, change from:#sql, reload, refresh from:body" {}
+            dialog id="sqlhelp" {
+                pre class="log" { (SQL_HELP) }
+                p { button type="button" onclick="el('sqlhelp').close()" { "Close" } }
+            }
             dialog id="edit" {
                 h2 { "Edit the selected files" }
                 p {
@@ -384,8 +390,8 @@ async fn image_rows(State(app): State<App>, Query(query): Query<RowsQuery>) -> P
                             th { input type="checkbox" onclick="toggleAll(this)" title="Select every group"; }
                             th { @if by == "date" { "Date" } @else { "Object" } }
                             th { "Files" } th { "Exposure" }
-                            th { @if by == "date" { "Objects" } @else { "Dates" } }
-                            @if by != "date" { th { "Filters" } }
+                            th class="c2" { @if by == "date" { "Objects" } @else { "Dates" } }
+                            @if by != "date" { th class="c2" { "Filters" } }
                         } }
                         tbody {
                             @for g in &groups {
@@ -403,10 +409,10 @@ async fn image_rows(State(app): State<App>, Query(query): Query<RowsQuery>) -> P
                                     td { (g.files) }
                                     td { (stats::hours(g.seconds)) }
                                     @if by == "date" {
-                                        td { (g.others.iter().cloned().collect::<Vec<_>>().join(", ")) }
+                                        td class="c2" { (g.others.iter().cloned().collect::<Vec<_>>().join(", ")) }
                                     } @else {
-                                        td { (g.first) @if g.last != g.first { " → " (g.last) } }
-                                        td { (g.others.iter().cloned().collect::<Vec<_>>().join(", ")) }
+                                        td class="c2" { (g.first) @if g.last != g.first { " → " (g.last) } }
+                                        td class="c2" { (g.others.iter().cloned().collect::<Vec<_>>().join(", ")) }
                                     }
                                 }
                                 tr class="members" hidden {
@@ -422,7 +428,7 @@ async fn image_rows(State(app): State<App>, Query(query): Query<RowsQuery>) -> P
                             td { "Total (" (groups.len()) " groups)" }
                             td { (shown) }
                             td { (stats::hours(groups.iter().map(|g| g.seconds).sum())) }
-                            td colspan="2" {}
+                            td class="c2" colspan="2" {}
                         } }
                     }
                 }
@@ -451,12 +457,13 @@ fn group_vals(by: &str, key: &str) -> String {
 
 /// The table of files; `sortable` headers re-sort the whole page.
 fn file_table(app: &App, files: &[FitsFile], sortable: bool) -> Markup {
-    let head = |label: &str, key: &str| {
+    // `class` says which columns narrow screens leave out (c2, c3).
+    let head = |label: &str, key: &str, class: &str| {
         html! {
             @if sortable {
-                th class="sort" onclick={"setSort('" (key) "')"} { (label) }
+                th class={"sort " (class)} onclick={"setSort('" (key) "')"} { (label) }
             } @else {
-                th { (label) }
+                th class=(class) { (label) }
             }
         }
     };
@@ -464,11 +471,11 @@ fn file_table(app: &App, files: &[FitsFile], sortable: bool) -> Markup {
         table {
             thead { tr {
                 th { @if sortable { input type="checkbox" onclick="toggleAll(this)" title="Select this page"; } }
-                (head("Object", "object")) (head("Type", "type")) (head("Date", "date"))
-                (head("Filter", "filter")) (head("Exp (s)", "exposure"))
-                th { "Bin" } th { "Temp" }
-                (head("Telescope / camera", "telescope"))
-                th { "File" } th {}
+                (head("Object", "object", "")) (head("Type", "type", "c2")) (head("Date", "date", ""))
+                (head("Filter", "filter", "")) (head("Exp (s)", "exposure", ""))
+                th class="c3" { "Bin" } th class="c3" { "Temp" }
+                (head("Telescope / camera", "telescope", "c2"))
+                th class="c2" { "File" } th {}
             } }
             tbody {
                 @for f in files {
@@ -476,14 +483,14 @@ fn file_table(app: &App, files: &[FitsFile], sortable: bool) -> Markup {
                         td { input type="checkbox" class="row" name="id" value=(f.id); }
                         td class="link" title="Show only this object" data-q=(opt(&f.object))
                             onclick="setSearch(this.dataset.q)" { (opt(&f.object)) }
-                        td { @if f.stacked { "STACKED" } @else { (opt(&f.image_type)) } }
+                        td class="c2" { @if f.stacked { "STACKED" } @else { (opt(&f.image_type)) } }
                         td { (opt(&f.date).replace('T', " ").chars().take(19).collect::<String>()) }
                         td { (opt(&f.filter)) }
                         td { (opt(&f.exptime)) }
-                        td { (opt(&f.xbin)) "x" (opt(&f.ybin)) }
-                        td { (opt(&f.ccd_temp)) }
-                        td { (opt(&f.telescope)) " / " (opt(&f.instrument)) }
-                        td class="file link" title={ (f.name) " (click to copy the path)" }
+                        td class="c3" { (opt(&f.xbin)) "x" (opt(&f.ybin)) }
+                        td class="c3" { (opt(&f.ccd_temp)) }
+                        td class="c2" { (opt(&f.telescope)) " / " (opt(&f.instrument)) }
+                        td class="c2 file link" title={ (f.name) " (click to copy the path)" }
                             data-path=(app.desktop_path(&f.name))
                             onclick="copyText(this.dataset.path)" { (f.file_name()) }
                         td { a href={ "/images/file?id=" (f.id) } title="Download, then open with the default app" { "Open" } }
@@ -1509,7 +1516,7 @@ async fn mappings(State(app): State<App>) -> Page {
             input type="text" name="replace" placeholder="replacement" required;
             button { "Add" }
         }
-        table style="width: auto" {
+        div class="scroll" { table style="width: auto" {
             tbody {
                 @for m in &list {
                     tr {
@@ -1523,7 +1530,7 @@ async fn mappings(State(app): State<App>) -> Page {
                     }
                 }
             }
-        }
+        } }
     };
     Ok(page(&app, "/mappings", false, body))
 }
@@ -1627,7 +1634,31 @@ fn merge_names(rows: Vec<(String, f64)>, same: &[(String, String)]) -> Vec<(Stri
     out
 }
 
-async fn stats_page(State(app): State<App>) -> Page {
+/// The last statistics shown, kept so the page appears at once.
+fn stats_saved_path(app: &App) -> PathBuf {
+    app.db_path.with_file_name("stats.html")
+}
+
+/// The statistics as last calculated, with a note that they are being
+/// recalculated; the fresh ones replace them when ready.
+async fn stats_page(State(app): State<App>) -> Markup {
+    let saved = std::fs::read_to_string(stats_saved_path(&app)).ok();
+    let body = html! {
+        // The page frame's own hx-select and hx-target would be inherited.
+        div id="stats" hx-get="/stats/fresh" hx-trigger="load" hx-target="this" hx-select="#stats"
+            hx-swap="outerHTML" {
+            p class="muted" {
+                span class="spinner" {}
+                @if saved.is_some() { " Recalculating; these are the numbers from last time." }
+                @else { " Calculating…" }
+            }
+            @if let Some(old) = &saved { (maud::PreEscaped(old)) }
+        }
+    };
+    page(&app, "/stats", true, body)
+}
+
+async fn stats_fresh(State(app): State<App>) -> Page {
     let a = app.clone();
     let s = blocking(move || stats::compute(&a.conn()?)).await?;
     let cfg = app.cfg();
@@ -1666,7 +1697,10 @@ async fn stats_page(State(app): State<App>) -> Page {
             }
         }
     };
-    Ok(page(&app, "/stats", true, body))
+    if let Err(e) = std::fs::write(stats_saved_path(&app), &body.0) {
+        log::warn!("Statistics not saved: {e}");
+    }
+    Ok(html! { div id="stats" { (body) } })
 }
 
 // ---------------------------------------------------------------- Settings

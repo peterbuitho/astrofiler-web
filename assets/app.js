@@ -125,3 +125,9 @@ function browse(target) {
   el('browse').showModal();
 }
 function pick(target, path) { el(target).value = path; el('browse').close(); }
+
+// On a phone the tabs are one scrolling row: bring the current one into view.
+window.addEventListener('load', () => {
+  const nav = document.querySelector('nav'), a = document.querySelector('nav a.active');
+  if (a) nav.scrollLeft = a.offsetLeft - (nav.clientWidth - a.offsetWidth) / 2;
+});

@@ -37,11 +37,11 @@ td.file { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
 #jobs { padding: 0 16px; }
 .job { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 6px 0; }
 .job form { margin: 0; }
-.job progress { width: 220px; }
+.job progress { flex: 0 1 220px; min-width: 80px; max-width: 100%; }
 .notes { padding: 6px 0; color: var(--muted); }
 .failed { color: var(--warn); }
 dialog { border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
-  max-width: min(640px, 94vw); }
+  max-width: min(640px, 94vw); max-height: 90vh; overflow: auto; }
 dialog::backdrop { background: rgba(0, 0, 0, .4); }
 .dirs { max-height: 50vh; overflow-y: auto; margin: 8px 0; }
 .dirs button { display: block; width: 100%; text-align: left; border: 0; background: none;
@@ -63,3 +63,53 @@ tr.group td, tr.total td { font-weight: 600; }
 tr.group td.link { white-space: nowrap; }
 tr.members > td { padding: 0 0 8px 0; }
 tr.members table { width: 100%; }
+
+.spinner { display: inline-block; width: .9em; height: .9em; vertical-align: -.1em;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- Phones and tablets ---- */
+input, select, textarea { max-width: 100%; }
+.toolbar input[type=search], .toolbar input[type=text] { flex: 0 1 auto; min-width: 0; }
+.apart { margin-left: auto; }
+textarea { width: 100%; max-width: 560px; }
+
+/* Finger-sized controls on touch screens; 16px fields keep iOS from zooming in. */
+@media (pointer: coarse) {
+  button, select, input[type=text], input[type=search] { min-height: 40px; }
+  button { padding: 6px 14px; }
+  input, select, textarea { font-size: 16px; }
+  input[type=checkbox] { width: 20px; height: 20px; vertical-align: middle; }
+  th, td { padding: 8px; }
+  nav a { padding: 8px 10px; }
+  .dirs button { padding: 12px 6px; }
+  label.line { margin: 10px 0; }
+}
+
+@media (max-width: 900px) {
+  .c3 { display: none; }
+  td.file { max-width: 240px; }
+}
+
+@media (max-width: 600px) {
+  .c2 { display: none; }
+  nav { flex-wrap: nowrap; overflow-x: auto; gap: 4px 8px; padding: 6px 10px;
+    position: sticky; top: 0; z-index: 2; background: var(--bg); scrollbar-width: none; }
+  nav::-webkit-scrollbar { display: none; }
+  nav a, nav strong, nav .version { flex: none; white-space: nowrap; }
+  main { padding: 10px; }
+  #jobs { padding: 0 10px; }
+  th { position: static; }
+  th, td { padding-left: 6px; padding-right: 6px; }
+  .toolbar input[type=search], .toolbar input[type=text] { flex: 1 1 100%; }
+  .toolbar input.sql { flex: 1 1 calc(100% - 60px); }
+  .apart { margin-left: 0; flex: 1 1 100%; margin-top: 8px; }
+  .grid { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
+  .grid input[type=text] { width: 100%; }
+  textarea { max-width: 100%; }
+  .grid > label:nth-child(odd), .grid > strong { margin-top: 10px; font-weight: 600; }
+  .bars { grid-template-columns: minmax(70px, 40%) minmax(30px, 1fr) max-content; }
+  dialog { width: 94vw; }
+  dialog input[type=text] { width: 100%; }
+}
