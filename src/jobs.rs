@@ -113,7 +113,7 @@ impl Jobs {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 db::open(&jobs.0.db_path).and_then(|mut conn| {
                     let mut cfg = cfg;
-                    crate::nick::merge(&mut cfg, crate::nick::load(&conn));
+                    astrofiler::nick::merge(&mut cfg, astrofiler::nick::load(&conn));
                     work(&mut conn, &cfg, &state)
                 })
             }))

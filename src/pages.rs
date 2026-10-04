@@ -2,11 +2,11 @@
 
 use crate::filter::{self, Filter};
 use crate::ui::{folder_input, jobs_panel, opt, page};
-use crate::{blocking, nick, App, AppError};
+use crate::{blocking, App, AppError};
 use astrofiler::batch::{self, EditOptions, EditReport, ExportLayout};
 use astrofiler::db::{self, FitsFile};
 use astrofiler::ingest::{self, IngestOptions, OnConflict, Placement};
-use astrofiler::{logging, names, sessions, stats, util};
+use astrofiler::{logging, names, nick, sessions, stats, util};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, StatusCode};
@@ -773,28 +773,7 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
             // Files a sync catalogued where they lie would be taken for
             // "loaded before" and left there. Forget them first, so the move
             // files them like new ones.
-            // The folder and the pictures in it may give the object a
-            // nickname, which then goes into the name of its folder.
-            let mut cfg = cfg.clone();
-            let mut found: Vec<String> = src
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .into_iter()
-                .collect();
-            nick::names_under(&src, 3, &is_picture, &mut found);
-            let learned = nick::learn(conn, &mut cfg, found, opts.dry_run);
-            let cfg = &cfg;
-            let mut refiled = 0;
-            if opts.placement == Placement::Move && !opts.dry_run {
-                refiled = forget_unfiled(conn, cfg, &src)?;
-            }
             let r = ingest::ingest_folder(conn, cfg, &src, opts, p)?;
-            if refiled > 0 {
-                log::info!(
-                    "{refiled} files were catalogued in place under {}",
-                    src.display()
-                );
-            }
             if opts.dry_run {
                 for (a, b) in &r.placed {
                     log::info!("plan: {} -> {}", a.display(), b.display());
@@ -811,9 +790,6 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
                 );
             }
             let mut summary = r.summary();
-            if !learned.is_empty() {
-                summary.push_str(&format!(", {} nicknames learned", learned.len()));
-            }
             // Moving a file that is already filed leaves the original in
             // place; delete it only if the repository copy is really there.
             let mut removed = 0;
@@ -835,261 +811,10 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
             if removed > 0 {
                 summary.push_str(&format!(", {removed} originals deleted"));
             }
-            // Pictures the user made from the frames go where the frames went.
-            if opts.placement != Placement::InPlace {
-                let mut filed: Vec<(PathBuf, PathBuf)> = r.placed.clone();
-                filed.extend(
-                    r.duplicates
-                        .iter()
-                        .map(|(a, b)| (a.clone(), PathBuf::from(b)))
-                        .filter(|(_, b)| b.is_absolute()),
-                );
-                let n = file_pictures(cfg, &src, &filed, opts);
-                if n > 0 {
-                    let would = if opts.dry_run { "would be " } else { "" };
-                    summary.push_str(&format!(", {n} processed pictures {would}filed"));
-                }
-            }
             Ok(summary)
         }),
     );
     Redirect::to("/images")
-}
-
-/// A picture the user saved from processed frames (JPG, PNG, TIFF), as
-/// opposed to what a telescope writes next to its frames: thumbnails and a
-/// preview of every sub-frame.
-fn is_picture(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let image = [".jpg", ".jpeg", ".png", ".tif", ".tiff"]
-        .iter()
-        .any(|e| name.ends_with(e));
-    let in_thumbnails = path
-        .parent()
-        .and_then(|d| d.file_name())
-        .is_some_and(|d| d.to_string_lossy().to_lowercase().contains("thumbnail"));
-    let telescope = name.contains("thumbnail")
-        || name.contains("_thn.")
-        || ["light_", "dark_", "flat_", "bias_", "img-", "failed_"]
-            .iter()
-            .any(|p| name.starts_with(p));
-    // Stack previews are filed by the library itself.
-    image && !in_thumbnails && !telescope && !util::is_sidecar(path)
-}
-
-fn pictures_under(dir: &Path, skip: &[PathBuf], out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            if !skip.contains(&p) {
-                pictures_under(&p, skip, out);
-            }
-        } else if is_picture(&p) {
-            out.push(p);
-        }
-    }
-}
-
-/// Move or copy the user's processed pictures under `src` to where the frames
-/// of their folder were filed (`filed`: input -> place in the repository).
-/// Returns how many were (or, in a dry run, would be) filed.
-fn file_pictures(
-    cfg: &astrofiler::config::Config,
-    src: &Path,
-    filed: &[(PathBuf, PathBuf)],
-    opts: IngestOptions,
-) -> usize {
-    let skip: Vec<PathBuf> = ingest::MANAGED_DIRS
-        .iter()
-        .map(|d| cfg.repo.join(d))
-        .collect();
-    let mut pictures = Vec::new();
-    pictures_under(src, &skip, &mut pictures);
-    let stem = |p: &Path| p.file_stem().map(|s| s.to_string_lossy().to_lowercase());
-    let top = |p: &Path| {
-        p.strip_prefix(&cfg.repo)
-            .ok()
-            .and_then(|r| r.components().next())
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-    };
-    let mut n = 0;
-    for pic in &pictures {
-        let pic = pic.as_path();
-        let Some(dir) = pic.parent() else { continue };
-        let beside: Vec<&(PathBuf, PathBuf)> = filed
-            .iter()
-            .filter(|(a, _)| a.parent() == Some(dir))
-            .collect();
-        // A preview of every sub-frame is the telescope's doing, not the
-        // user's; one or two pictures named like a frame are the user's.
-        let twin = beside.iter().find(|(a, _)| stem(a) == stem(&pic));
-        let frame_twin = |p: &Path| {
-            beside
-                .iter()
-                .any(|(a, b)| stem(a) == stem(p) && top(b).as_deref() != Some("Stacked"))
-        };
-        if frame_twin(&pic)
-            && pictures
-                .iter()
-                .filter(|p| p.parent() == Some(dir) && frame_twin(p))
-                .count()
-                > 2
-        {
-            continue;
-        }
-        // Next to the result it was made from, else next to a stacked result
-        // of the same folder, else in the object folder of the frames below.
-        let dest_dir = twin
-            .or_else(|| {
-                beside
-                    .iter()
-                    .find(|(_, b)| top(b).as_deref() == Some("Stacked"))
-            })
-            .and_then(|(_, b)| b.parent().map(Path::to_path_buf))
-            .or_else(|| {
-                let (_, b) = beside
-                    .first()
-                    .copied()
-                    .or_else(|| filed.iter().find(|(a, _)| a.starts_with(dir)))?;
-                let mut parts = b.strip_prefix(&cfg.repo).ok()?.components();
-                Some(cfg.repo.join(parts.next()?).join(parts.next()?))
-            });
-        let Some(dest_dir) = dest_dir else {
-            log::info!(
-                "{}: left, no frames of its folder were filed",
-                pic.display()
-            );
-            continue;
-        };
-        let Some(name) = pic.file_name() else {
-            continue;
-        };
-        let dest = dest_dir.join(name);
-        if dest == pic {
-            continue;
-        }
-        let same_size = |a: &Path, b: &Path| match (a.metadata(), b.metadata()) {
-            (Ok(x), Ok(y)) => x.len() == y.len(),
-            _ => false,
-        };
-        // Pictures keep their names: one that is taken stays where it is.
-        if dest.exists() {
-            if same_size(pic, &dest) {
-                log::info!("{}: already at {}", pic.display(), dest.display());
-            } else {
-                log::warn!(
-                    "{}: left, a different picture is already at {}",
-                    pic.display(),
-                    dest.display()
-                );
-            }
-            continue;
-        }
-        if opts.dry_run {
-            log::info!("plan: {} -> {}", pic.display(), dest.display());
-            n += 1;
-            continue;
-        }
-        let done = if opts.placement == Placement::Move {
-            util::move_file(&pic, &dest)
-        } else {
-            util::copy_file(&pic, &dest).map(|_| ())
-        };
-        match done {
-            Ok(()) => {
-                log::info!("picture: {} -> {}", pic.display(), dest.display());
-                n += 1;
-            }
-            Err(e) => log::warn!("{}: not filed ({e:#})", pic.display()),
-        }
-    }
-    n
-}
-
-/// Drop the catalogue rows of files under `src` that are not in the
-/// repository's own folders yet. The files are not touched.
-fn forget_unfiled(
-    conn: &rusqlite::Connection,
-    cfg: &astrofiler::config::Config,
-    src: &Path,
-) -> anyhow::Result<usize> {
-    let under = |p: &Path| format!("{}/", util::normalize_path(p).trim_end_matches('/'));
-    let n = conn.execute(
-        "DELETE FROM fitsFile WHERE substr(fitsFileName, 1, length(?1)) = ?1 \
-         AND substr(fitsFileName, 1, length(?2)) <> ?2 \
-         AND substr(fitsFileName, 1, length(?3)) <> ?3 \
-         AND substr(fitsFileName, 1, length(?4)) <> ?4",
-        rusqlite::params![
-            under(src),
-            under(&cfg.repo.join("Light")),
-            under(&cfg.repo.join("Stacked")),
-            under(&cfg.repo.join("Calibrate")),
-        ],
-    )?;
-    Ok(n)
-}
-
-/// The settings with the nicknames found in the repository: in the names of
-/// the folders next to the managed ones, of the object folders and of the
-/// processed pictures filed with the frames.
-fn learn_from_repo(
-    conn: &rusqlite::Connection,
-    cfg: &astrofiler::config::Config,
-) -> astrofiler::config::Config {
-    let mut cfg = cfg.clone();
-    let mut found = Vec::new();
-    nick::names_under(&cfg.repo, 0, &is_picture, &mut found);
-    for top in ["Light", "Stacked"] {
-        nick::names_under(&cfg.repo.join(top), 3, &is_picture, &mut found);
-    }
-    nick::learn(conn, &mut cfg, found, false);
-    cfg
-}
-
-/// After frames moved to a renamed folder, the processed pictures filed next
-/// to them go along, under their own names.
-fn pictures_follow(cfg: &astrofiler::config::Config, moved: &[(PathBuf, PathBuf)]) {
-    let mut dirs: std::collections::BTreeSet<(PathBuf, PathBuf)> = Default::default();
-    for (old, new) in moved {
-        // Folders pair up level by level only when the depth is unchanged.
-        let levels = if old.components().count() == new.components().count() {
-            4
-        } else {
-            1
-        };
-        for (a, b) in old.ancestors().zip(new.ancestors()).skip(1).take(levels) {
-            if a == b {
-                break;
-            }
-            dirs.insert((a.to_path_buf(), b.to_path_buf()));
-        }
-    }
-    for (old, new) in dirs {
-        let Ok(entries) = std::fs::read_dir(&old) else {
-            continue;
-        };
-        for p in entries.flatten().map(|e| e.path()) {
-            let Some(name) = p.file_name() else { continue };
-            let to = new.join(name);
-            if !p.is_file() || !is_picture(&p) {
-                continue;
-            }
-            if to.exists() {
-                log::warn!("{}: left, {} exists", p.display(), to.display());
-            } else if let Err(e) = util::move_file(&p, &to) {
-                log::warn!("{}: not moved ({e})", p.display());
-            }
-        }
-    }
-    for top in ["Light", "Stacked"] {
-        batch::remove_empty_dirs(&cfg.repo.join(top));
-    }
 }
 
 fn paths_same(a: &Path, b: &Path) -> bool {
@@ -1098,7 +823,6 @@ fn paths_same(a: &Path, b: &Path) -> bool {
 
 async fn sync(State(app): State<App>) -> Redirect {
     app.jobs.spawn("Sync repository", |conn, cfg, p| {
-        let cfg = &learn_from_repo(conn, cfg);
         Ok(ingest::ingest_folder(conn, cfg, &cfg.repo, IngestOptions::IN_PLACE, p)?.summary())
     });
     Redirect::to("/images")
@@ -1397,7 +1121,6 @@ async fn batch_run(State(app): State<App>, Form(f): Form<RunForm>) -> Redirect {
             ))
         }),
         "regenerate" => jobs.spawn("Regenerate", |conn, cfg, p| {
-            let cfg = &learn_from_repo(conn, cfg);
             Ok(batch::regenerate(conn, cfg, p)?.summary())
         }),
         "layout_check" => jobs.spawn_read("Check folders", |conn, cfg, _| {
@@ -1407,12 +1130,10 @@ async fn batch_run(State(app): State<App>, Form(f): Form<RunForm>) -> Redirect {
             ))
         }),
         "layout_migrate" => jobs.spawn("Update folders", |conn, cfg, p| {
-            let cfg = &learn_from_repo(conn, cfg);
             let r = batch::migrate_layout(conn, cfg, false, p)?;
             for (f, e) in &r.errors {
                 log::warn!("Not moved: {} ({e})", f.display());
             }
-            pictures_follow(cfg, &r.moved);
             Ok(format!(
                 "{} files moved to the current layout{}",
                 r.moved.len(),

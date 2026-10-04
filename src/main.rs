@@ -3,7 +3,6 @@
 
 mod filter;
 mod jobs;
-mod nick;
 mod pages;
 mod ui;
 
@@ -54,7 +53,7 @@ impl AppState {
         let mut cfg = self.cfg_saved();
         let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
         if let Ok(conn) = rusqlite::Connection::open_with_flags(&self.db_path, flags) {
-            nick::merge(&mut cfg, nick::load(&conn));
+            astrofiler::nick::merge(&mut cfg, astrofiler::nick::load(&conn));
         }
         cfg
     }
