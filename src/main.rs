@@ -3,6 +3,7 @@
 
 mod filter;
 mod jobs;
+mod nightly;
 mod pages;
 mod ui;
 
@@ -194,6 +195,7 @@ async fn main() -> Result<()> {
     );
     println!("{started}");
     log::info!("{started}");
+    nightly::start(app.clone());
     axum::serve(listener, router(app))
         .with_graceful_shutdown(shutdown())
         .await?;
@@ -384,6 +386,58 @@ mod tests {
         // Only the file that was removed from the catalogue is still there.
         let on_disk = astrofiler::ingest::collect_files(&tmp.path().join("astro/repo"), &[]);
         assert_eq!(on_disk.len(), 1, "{on_disk:?}");
+    }
+
+    #[tokio::test]
+    async fn nightly_load_moves_the_incoming_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        // Off until it is switched on in the settings.
+        assert_eq!(pages::nightly_time(&app), None);
+        let cfg = app.cfg_saved();
+        let form = format!(
+            "repo={}&source={}&on_conflict=skip&nightly=1&nightly_time=03%3A30",
+            cfg.repo.display(),
+            cfg.source.display()
+        );
+        assert_eq!(post(&app, "/settings", &form).await, StatusCode::SEE_OTHER);
+        assert_eq!(pages::nightly_time(&app), Some((3, 30)));
+        let (_, page) = get(&app, "/settings").await;
+        assert!(page.contains("value=\"03:30\""), "{page}");
+
+        // An empty folder is nothing to do; one being written to has to wait.
+        let inbox = tmp.path().join("astro/inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        assert!(nightly::run(&app));
+        assert!(app.jobs.idle());
+        frame(
+            &inbox.join("night 1"),
+            "a.fits",
+            "M 31",
+            "2026-09-01T21:00:00",
+        );
+        assert!(!nightly::run(&app));
+        assert!(app.jobs.idle());
+        // Half an hour later it is filed.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(1800);
+        let file = std::fs::File::options()
+            .write(true)
+            .open(inbox.join("night 1/a.fits"))
+            .unwrap();
+        file.set_modified(old).unwrap();
+        drop(file);
+        assert!(nightly::run(&app));
+        wait_idle(&app).await;
+        let files = db::all_files(&app.conn().unwrap(), false).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].name.contains("/repo/Light/"), "{}", files[0].name);
+        assert!(!inbox.join("night 1").exists());
+        let notes = app.jobs.snapshot().notes;
+        assert!(notes[0].1.starts_with("Nightly load: "), "{notes:?}");
+
+        let form = form.replace("&nightly=1", "");
+        assert_eq!(post(&app, "/settings", &form).await, StatusCode::SEE_OTHER);
+        assert_eq!(pages::nightly_time(&app), None);
     }
 
     #[tokio::test]

@@ -140,8 +140,8 @@ dependencies = [
 
 [[package]]
 name = "astrofiler"
-version = "0.8.1"
-source = "git+https://github.com/peterbuitho/astrofiler-rs#0284687a83338f3f5d209b8e27aa8cfcdd70f4bf"
+version = "0.8.2"
+source = "git+https://github.com/peterbuitho/astrofiler-rs#41dd53e7fc7381ba039cea9df78b52f329c2d3d4"
 dependencies = [
  "anyhow",
  "base64",
@@ -171,13 +171,14 @@ dependencies = [
 
 [[package]]
 name = "astrofiler-web"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "astrofiler",
  "axum",
  "axum-extra",
  "base64",
+ "chrono",
  "libc",
  "log",
  "maud",

@@ -779,60 +779,71 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
     app.jobs.submit(
         if opts.dry_run { "Dry run" } else { "Load" },
         !opts.dry_run,
-        Box::new(move |conn, cfg, p| {
-            // Files a sync catalogued where they lie would be taken for
-            // "loaded before" and left there. Forget them first, so the move
-            // files them like new ones.
-            let r = ingest::ingest_folder(conn, cfg, &src, opts, p)?;
-            if opts.dry_run {
-                for (a, b) in &r.placed {
-                    log::info!("plan: {} -> {}", a.display(), b.display());
-                }
-            }
-            for (a, e) in &r.errors {
-                log::warn!("{}: {e}", a.display());
-            }
-            for (a, b) in &r.conflicts {
-                log::warn!(
-                    "{}: skipped, a different file already exists at {}",
-                    a.display(),
-                    b.display()
-                );
-            }
-            let mut summary = r.summary();
-            // Moving a file that is already filed leaves the original in
-            // place; delete it only if the repository copy is really there.
-            let mut removed = 0;
-            for (input, existing) in &r.duplicates {
-                let (src, kept) = (Path::new(input), Path::new(existing));
-                let same = match (src.metadata(), kept.metadata()) {
-                    (Ok(a), Ok(b)) => a.is_file() && b.is_file() && a.len() == b.len(),
-                    _ => false,
-                };
-                if remove_known && same && !paths_same(src, kept) {
-                    match std::fs::remove_file(src) {
-                        Ok(()) => removed += 1,
-                        Err(e) => log::warn!("{}: not deleted ({e})", src.display()),
-                    }
-                } else {
-                    log::info!("{}: already in the repository as {existing}", src.display());
-                }
-            }
-            if removed > 0 {
-                summary.push_str(&format!(", {removed} originals deleted"));
-            }
-            // Deleting the originals may have emptied the folder.
-            if opts.placement == Placement::Move && !opts.dry_run {
-                let more = batch::prune_source(cfg, &src);
-                if more > 0 {
-                    let also = if r.folders_removed > 0 { "more " } else { "" };
-                    summary.push_str(&format!(", {more} {also}empty folders removed"));
-                }
-            }
-            Ok(summary)
-        }),
+        Box::new(move |conn, cfg, p| run_load(conn, cfg, p, &src, opts, remove_known)),
     );
     Redirect::to("/images")
+}
+
+/// File a folder into the repository and say what happened: the Load page's
+/// Start button and the nightly load.
+pub fn run_load(
+    conn: &mut rusqlite::Connection,
+    cfg: &astrofiler::config::Config,
+    p: &astrofiler::progress::JobState,
+    src: &Path,
+    opts: IngestOptions,
+    remove_known: bool,
+) -> anyhow::Result<String> {
+    // Files a sync catalogued where they lie would be taken for
+    // "loaded before" and left there. Forget them first, so the move
+    // files them like new ones.
+    let r = ingest::ingest_folder(conn, cfg, src, opts, p)?;
+    if opts.dry_run {
+        for (a, b) in &r.placed {
+            log::info!("plan: {} -> {}", a.display(), b.display());
+        }
+    }
+    for (a, e) in &r.errors {
+        log::warn!("{}: {e}", a.display());
+    }
+    for (a, b) in &r.conflicts {
+        log::warn!(
+            "{}: skipped, a different file already exists at {}",
+            a.display(),
+            b.display()
+        );
+    }
+    let mut summary = r.summary();
+    // Moving a file that is already filed leaves the original in
+    // place; delete it only if the repository copy is really there.
+    let mut removed = 0;
+    for (input, existing) in &r.duplicates {
+        let (src, kept) = (Path::new(input), Path::new(existing));
+        let same = match (src.metadata(), kept.metadata()) {
+            (Ok(a), Ok(b)) => a.is_file() && b.is_file() && a.len() == b.len(),
+            _ => false,
+        };
+        if remove_known && same && !paths_same(src, kept) {
+            match std::fs::remove_file(src) {
+                Ok(()) => removed += 1,
+                Err(e) => log::warn!("{}: not deleted ({e})", src.display()),
+            }
+        } else {
+            log::info!("{}: already in the repository as {existing}", src.display());
+        }
+    }
+    if removed > 0 {
+        summary.push_str(&format!(", {removed} originals deleted"));
+    }
+    // Deleting the originals may have emptied the folder.
+    if opts.placement == Placement::Move && !opts.dry_run {
+        let more = batch::prune_source(cfg, src);
+        if more > 0 {
+            let also = if r.folders_removed > 0 { "more " } else { "" };
+            summary.push_str(&format!(", {more} {also}empty folders removed"));
+        }
+    }
+    Ok(summary)
 }
 
 fn paths_same(a: &Path, b: &Path) -> bool {
@@ -1333,6 +1344,23 @@ Astro = Astro / IRCUT
 IRCUT = Astro / IRCUT
 ";
 
+/// When the nightly load runs: "HH:MM" in a file beside the catalogue, no
+/// file when it is off.
+fn nightly_path(app: &App) -> PathBuf {
+    app.db_path.with_file_name("nightly.txt")
+}
+
+fn parse_time(text: &str) -> Option<(u32, u32)> {
+    let (h, m) = text.trim().split_once(':')?;
+    let (h, m) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60).then_some((h, m))
+}
+
+/// Hour and minute of the nightly load, None when it is off.
+pub fn nightly_time(app: &App) -> Option<(u32, u32)> {
+    parse_time(&std::fs::read_to_string(nightly_path(app)).ok()?)
+}
+
 fn stats_names_path(app: &App) -> PathBuf {
     app.db_path.with_file_name("stats-names.txt")
 }
@@ -1470,6 +1498,8 @@ async fn settings(State(app): State<App>) -> Markup {
         .iter()
         .map(|(o, n)| format!("{o} = {n}\n"))
         .collect();
+    let nightly = nightly_time(&app);
+    let at = nightly.unwrap_or((2, 0));
     let body = html! {
         form method="post" action="/settings" {
             div class="grid" {
@@ -1477,6 +1507,10 @@ async fn settings(State(app): State<App>) -> Markup {
                 div { (folder_input("cfg_repo", "repo", &c.repo.to_string_lossy())) }
                 label title="Default folder for Load" { "Incoming folder" }
                 div { (folder_input("cfg_source", "source", &c.source.to_string_lossy())) }
+                label title="Files that are still being copied are waited for" { "Nightly load" }
+                label { input type="checkbox" name="nightly" value="1" checked[nightly.is_some()];
+                    " Move the incoming folder into the repository every night at "
+                    input type="time" name="nightly_time" value=(format!("{:02}:{:02}", at.0, at.1)); }
                 label { "Save fixed headers" }
                 label { input type="checkbox" name="save_modified_headers" value="1"
                     checked[c.save_modified_headers];
@@ -1518,6 +1552,8 @@ struct SettingsForm {
     source: String,
     save_modified_headers: Option<String>,
     on_conflict: String,
+    nightly: Option<String>,
+    nightly_time: String,
     object_names: String,
     nicknames: String,
     stats_names: String,
@@ -1544,7 +1580,15 @@ async fn settings_save(State(app): State<App>, Form(f): Form<SettingsForm>) -> R
     let saved = c.save().and_then(|()| {
         nick::replace(&mut app.conn()?, &nicknames)?;
         let text = f.stats_names.replace("\r\n", "\n");
-        Ok(std::fs::write(stats_names_path(&app), text)?)
+        std::fs::write(stats_names_path(&app), text)?;
+        if ticked(&f.nightly) {
+            let (h, m) = parse_time(&f.nightly_time)
+                .ok_or_else(|| anyhow::anyhow!("nightly load: no time given"))?;
+            std::fs::write(nightly_path(&app), format!("{h:02}:{m:02}\n"))?;
+        } else if nightly_path(&app).exists() {
+            std::fs::remove_file(nightly_path(&app))?;
+        }
+        Ok(())
     });
     match saved {
         Ok(()) => {
