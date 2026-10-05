@@ -44,7 +44,8 @@ pub fn page(app: &AppState, active: &str, live: bool, body: Markup) -> Markup {
                 (jobs_panel(&app.jobs.snapshot()))
                 @if live {
                     main hx-get=(active) hx-trigger="refresh from:body" hx-select="main"
-                        hx-target="this" hx-swap="outerHTML" { (body) }
+                        hx-target="this" hx-swap="outerHTML"
+                        hx-disinherit="hx-select hx-target hx-swap" { (body) }
                 } @else {
                     main { (body) }
                 }

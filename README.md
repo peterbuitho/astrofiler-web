@@ -80,9 +80,9 @@ The AstroFiler library comes from GitHub at the commit in `Cargo.lock`;
 
 ## Release
 
-Push a version tag (`git tag v0.3.8 && git push origin v0.3.8`) and the
+Push a version tag (`git tag v0.3.9 && git push origin v0.3.9`) and the
 GitHub Action in `.github/workflows/docker.yml` runs the tests, builds the
-image for amd64 and pushes `ntmb/astrofiler-web:0.3.8` and
+image for amd64 and pushes `ntmb/astrofiler-web:0.3.9` and
 `:latest` to Docker Hub. It needs two repository secrets (Settings > Secrets
 and variables > Actions): `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (an
 access token with write permission, made at hub.docker.com > Account settings
