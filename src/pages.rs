@@ -728,6 +728,8 @@ async fn load(State(app): State<App>) -> Markup {
                 " Catalogue in place (no renaming or moving)" }
             label class="line" style="margin-left: 24px" { input type="checkbox" name="remove_known" value="1";
                 " Delete the original when the same file is already in the repository (otherwise it stays in the folder)" }
+            label class="line" { input type="checkbox" name="object_from_folder" value="1";
+                " Frames that name no target (no OBJECT in the header) take the name of the folder they are in (otherwise they are not loaded)" }
             p { "If a different file already has the same name in the repository:" }
             p {
                 @for c in OnConflict::ALL {
@@ -754,6 +756,7 @@ struct LoadForm {
     placement: String,
     on_conflict: String,
     remove_known: Option<String>,
+    object_from_folder: Option<String>,
     dry_run: Option<String>,
 }
 
@@ -774,6 +777,7 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
         dry_run: ticked(&f.dry_run),
         on_conflict: OnConflict::parse(&f.on_conflict).unwrap_or(app.cfg().on_conflict),
         quick: false,
+        object_from_folder: ticked(&f.object_from_folder),
     };
     let remove_known = ticked(&f.remove_known) && placement == Placement::Move && !opts.dry_run;
     app.jobs.submit(

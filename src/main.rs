@@ -389,6 +389,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frames_without_a_target_are_named_after_their_folder_when_asked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let folder = tmp.path().join("astro/inbox/M 66 group Leo Triplet");
+        frame(&folder.join("sub"), "a.fits", "X", "2026-03-20T22:04:21");
+        let path = folder.join("sub/a.fits");
+        let mut h = fits::read_primary_header(&path).unwrap();
+        h.remove("OBJECT");
+        fits::rewrite_primary_header(&path, &h).unwrap();
+        let form = format!(
+            "folder={}&placement=move&on_conflict=skip",
+            folder.display()
+        );
+        assert_eq!(post(&app, "/load", &form).await, StatusCode::SEE_OTHER);
+        wait_idle(&app).await;
+        assert!(db::all_files(&app.conn().unwrap(), false)
+            .unwrap()
+            .is_empty());
+        assert!(path.exists());
+        let form = format!("{form}&object_from_folder=1");
+        assert_eq!(post(&app, "/load", &form).await, StatusCode::SEE_OTHER);
+        wait_idle(&app).await;
+        let files = db::all_files(&app.conn().unwrap(), false).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].object.as_deref(), Some("M 66"));
+        assert!(!folder.exists());
+    }
+
+    #[tokio::test]
     async fn nightly_load_moves_the_incoming_folder() {
         let tmp = tempfile::tempdir().unwrap();
         let app = test_app(tmp.path(), None);
