@@ -418,6 +418,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nothing_is_moved_or_deleted_out_of_the_repository_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let inbox = tmp.path().join("astro/inbox");
+        frame(&inbox, "a.fits", "M 31", "2026-09-01T21:00:00");
+        let form = format!("folder={}&placement=move&on_conflict=skip", inbox.display());
+        assert_eq!(post(&app, "/load", &form).await, StatusCode::SEE_OTHER);
+        wait_idle(&app).await;
+        let files = db::all_files(&app.conn().unwrap(), false).unwrap();
+        let filed = std::path::PathBuf::from(&files[0].name);
+        assert!(filed.is_file(), "{}", filed.display());
+        for dir in [app.cfg().repo.join("Light"), filed.parent().unwrap().into()] {
+            let form = format!(
+                "folder={}&placement=move&on_conflict=skip&remove_known=1",
+                dir.display()
+            );
+            assert_eq!(post(&app, "/load", &form).await, StatusCode::SEE_OTHER);
+            wait_idle(&app).await;
+            assert!(filed.is_file());
+            let notes = app.jobs.snapshot().notes;
+            assert!(notes[0].0 && notes[0].1.contains("Light folder"), "{notes:?}");
+        }
+        assert_eq!(db::all_files(&app.conn().unwrap(), false).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn nightly_load_moves_the_incoming_folder() {
         let tmp = tempfile::tempdir().unwrap();
         let app = test_app(tmp.path(), None);

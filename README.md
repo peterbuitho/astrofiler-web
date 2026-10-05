@@ -13,7 +13,7 @@ layout and settings file are the same as the desktop app's.
 | Page | |
 |---|---|
 | Images | Search (plus an advanced SQLite condition), filter, sort, group by object or date (the panels of a mosaic are one group); open a file, edit a header field, export, remove from the catalogue or delete from disk (typed confirmation) |
-| Load | File a folder into the repository (move, copy or catalogue in place), optionally deleting originals already filed and naming frames that have no target in their header after their folder, and the folder itself once it is empty; processed JPG/PNG/TIFF pictures go along under their own names, telescope thumbnails stay; a nickname in the folder or picture name ("C 7 Spiral Galaxy") is remembered and goes into the object's folder name; sync the repository; with **Nightly load** switched on in Settings, the incoming folder is moved into the repository every night at the time set there, once nothing has been written to it for 15 minutes |
+| Load | File a folder into the repository (move, copy or catalogue in place), optionally deleting originals already filed and naming frames that have no target in their header after their folder, and the folder itself once it is empty; processed JPG/PNG/TIFF pictures go along under their own names, telescope thumbnails stay; a nickname in the folder or picture name ("C 7 Spiral Galaxy") is remembered and goes into the object's folder name; nothing is moved or deleted out of the repository's own Light, Stacked, Calibrate and Archive folders; sync the repository; with **Nightly load** switched on in Settings, the incoming folder is moved into the repository every night at the time set there, once nothing has been written to it for 15 minutes |
 | Sessions | Create, clear and export sessions |
 | Batch | Merge objects, verify, regenerate, folder layout, clean previews |
 | Duplicates | Identical files, and deleting the extra copies |
@@ -80,9 +80,9 @@ The AstroFiler library comes from GitHub at the commit in `Cargo.lock`;
 
 ## Release
 
-Push a version tag (`git tag v0.3.11 && git push origin v0.3.11`) and the
+Push a version tag (`git tag v0.3.12 && git push origin v0.3.12`) and the
 GitHub Action in `.github/workflows/docker.yml` runs the tests, builds the
-image for amd64 and pushes `ntmb/astrofiler-web:0.3.11` and
+image for amd64 and pushes `ntmb/astrofiler-web:0.3.12` and
 `:latest` to Docker Hub. It needs two repository secrets (Settings > Secrets
 and variables > Actions): `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (an
 access token with write permission, made at hub.docker.com > Account settings

@@ -779,6 +779,12 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
         quick: false,
         object_from_folder: ticked(&f.object_from_folder),
     };
+    if placement == Placement::Move {
+        if let Some(why) = filed_already(&app.cfg(), &src) {
+            app.jobs.note(true, format!("Load: {why}"));
+            return Redirect::to("/load");
+        }
+    }
     let remove_known = ticked(&f.remove_known) && placement == Placement::Move && !opts.dry_run;
     app.jobs.submit(
         if opts.dry_run { "Dry run" } else { "Load" },
@@ -786,6 +792,20 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
         Box::new(move |conn, cfg, p| run_load(conn, cfg, p, &src, opts, remove_known)),
     );
     Redirect::to("/images")
+}
+
+/// Why nothing is moved (or deleted) out of `src`: it is one of the
+/// repository's organised folders, or lies in one.
+fn filed_already(cfg: &astrofiler::config::Config, src: &Path) -> Option<String> {
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let path = real(src);
+    let dir = ingest::MANAGED_DIRS
+        .iter()
+        .find(|d| path.starts_with(real(&cfg.repo.join(d))))?;
+    Some(format!(
+        "{} is in the repository's {dir} folder: files there are already filed and are not moved or deleted",
+        src.display()
+    ))
 }
 
 /// File a folder into the repository and say what happened: the Load page's
@@ -798,6 +818,11 @@ pub fn run_load(
     opts: IngestOptions,
     remove_known: bool,
 ) -> anyhow::Result<String> {
+    if opts.placement == Placement::Move {
+        if let Some(why) = filed_already(cfg, src) {
+            anyhow::bail!(why);
+        }
+    }
     // Files a sync catalogued where they lie would be taken for
     // "loaded before" and left there. Forget them first, so the move
     // files them like new ones.
