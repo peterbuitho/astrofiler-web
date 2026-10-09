@@ -1653,9 +1653,14 @@ async fn settings_save(State(app): State<App>, Form(f): Form<SettingsForm>) -> R
         .nicknames_shown
         .first()
         .is_none_or(|shown| lines(shown) != lines(&f.nicknames));
-    let saved = c.save().and_then(|()| {
-        // The file is written, so the program follows it whatever fails below.
-        *app.cfg.write().unwrap() = c;
+    if let Err(e) = c.save() {
+        app.jobs
+            .note(true, format!("Could not save settings: {e:#}"));
+        return Redirect::to("/settings");
+    }
+    // The file is written, so the program follows it whatever fails below.
+    *app.cfg.write().unwrap() = c;
+    let saved = (|| -> anyhow::Result<()> {
         if edited {
             nick::replace(&mut app.conn()?, &nicknames)?;
         }
@@ -1667,7 +1672,7 @@ async fn settings_save(State(app): State<App>, Form(f): Form<SettingsForm>) -> R
             std::fs::remove_file(nightly_path(&app))?;
         }
         Ok(())
-    });
+    })();
     match saved {
         Ok(()) => app.jobs.note(false, "Settings saved".into()),
         Err(e) => app
