@@ -1,6 +1,6 @@
 [package]
 name = "astrofiler-web"
-version = "0.3.12"
+version = "0.3.13"
 edition = "2021"
 description = "Web interface for AstroFiler, to run next to the files (e.g. in Docker on a NAS)"
 license = "GPL-3.0-or-later"
