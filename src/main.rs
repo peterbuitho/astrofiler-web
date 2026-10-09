@@ -840,4 +840,24 @@ mod tests {
         post(&app, "/settings", &removed).await;
         assert!(nicks().is_empty());
     }
+
+    #[tokio::test]
+    async fn a_settings_file_that_cannot_be_written_is_not_called_saved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let old = app.cfg_saved().repo;
+        // A folder where the settings file should be: it can't be written.
+        std::fs::create_dir(tmp.path().join("astrofiler.ini")).unwrap();
+        let form = format!(
+            "repo={}&on_conflict=skip",
+            tmp.path().join("other").display()
+        );
+        post(&app, "/settings", &form).await;
+        let note = &app.jobs.snapshot().notes[0];
+        assert!(
+            note.0 && note.1.starts_with("Could not save settings"),
+            "{note:?}"
+        );
+        assert_eq!(app.cfg_saved().repo, old);
+    }
 }
