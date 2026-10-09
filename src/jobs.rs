@@ -186,6 +186,7 @@ impl Jobs {
     /// For when the server stops: nothing waiting starts, running tasks are
     /// asked to stop, and this returns once they have.
     pub fn shutdown(&self) {
+        let mut told = false;
         loop {
             {
                 let mut inner = self.0.inner.lock().unwrap();
@@ -193,6 +194,10 @@ impl Jobs {
                 inner.queued.clear();
                 if inner.running.is_empty() {
                     return;
+                }
+                if !told {
+                    println!("Waiting for {} running tasks", inner.running.len());
+                    told = true;
                 }
                 for j in &inner.running {
                     j.state.cancel.store(true, Ordering::SeqCst);

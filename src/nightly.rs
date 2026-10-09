@@ -4,7 +4,7 @@
 
 use crate::App;
 use astrofiler::ingest::IngestOptions;
-use chrono::{DateTime, Duration, Local, NaiveDateTime};
+use chrono::{Duration, Local, NaiveDateTime};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -24,18 +24,20 @@ fn due(prev: NaiveDateTime, now: NaiveDateTime, at: (u32, u32)) -> bool {
     })
 }
 
-/// How many files are under `dir`, and when the latest was changed.
-fn newest(dir: &Path, found: &mut (usize, Option<SystemTime>)) {
+/// How many files are under `dir`, and when the latest was changed. A time
+/// after `limit` is a telescope with a wrong clock, not a file that is still
+/// arriving, and must not hide one that is.
+fn newest(dir: &Path, limit: SystemTime, found: &mut (usize, Option<SystemTime>)) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     for e in rd.flatten() {
         let Ok(meta) = e.metadata() else { continue };
         if meta.is_dir() {
-            newest(&e.path(), found);
+            newest(&e.path(), limit, found);
         } else if !e.file_name().to_string_lossy().starts_with('.') {
             found.0 += 1;
-            found.1 = found.1.max(meta.modified().ok());
+            found.1 = found.1.max(meta.modified().ok().filter(|t| *t < limit));
         }
     }
 }
@@ -48,17 +50,12 @@ enum Folder {
 }
 
 fn look(dir: &Path, now: SystemTime) -> Folder {
+    let quiet = std::time::Duration::from_secs(QUIET_MINUTES as u64 * 60);
     let mut found = (0, None);
-    newest(dir, &mut found);
-    let quiet = Duration::minutes(QUIET_MINUTES);
-    let now = DateTime::<Local>::from(now);
+    newest(dir, now + quiet, &mut found);
     match found {
         (0, _) => Folder::Empty,
-        // A time well in the future is a telescope with a wrong clock, not
-        // a file that is still arriving.
-        (_, Some(t)) if (now - quiet..now + quiet).contains(&DateTime::<Local>::from(t)) => {
-            Folder::Busy
-        }
+        (_, Some(t)) if t + quiet > now => Folder::Busy,
         _ => Folder::Ready,
     }
 }
@@ -160,8 +157,18 @@ mod tests {
         assert!(matches!(look(tmp.path(), now), Folder::Busy));
         let later = now + std::time::Duration::from_secs(16 * 60);
         assert!(matches!(look(tmp.path(), later), Folder::Ready));
-        // A file dated in the future does not hold the load up.
+        // A file dated in the future does not hold the load up...
         let earlier = now - std::time::Duration::from_secs(16 * 60);
         assert!(matches!(look(tmp.path(), earlier), Folder::Ready));
+        // ...and does not hide one that is still arriving.
+        std::fs::write(tmp.path().join("night/b.fits"), b"x").unwrap();
+        let a = std::fs::File::options()
+            .write(true)
+            .open(tmp.path().join("night/a.fits"))
+            .unwrap();
+        a.set_modified(now + std::time::Duration::from_secs(86400))
+            .unwrap();
+        assert!(matches!(look(tmp.path(), now), Folder::Busy));
+        assert!(matches!(look(tmp.path(), later), Folder::Ready));
     }
 }

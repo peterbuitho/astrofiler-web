@@ -753,6 +753,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_sql_condition_that_never_ends_is_stopped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let inbox = tmp.path().join("inbox");
+        frame(&inbox, "a.fits", "M 31", "2026-01-20T01:00:00");
+        let form = format!("folder={}&placement=move&on_conflict=skip", inbox.display());
+        post(&app, "/load", &form).await;
+        wait_idle(&app).await;
+        let endless = "fitsFileId IN (WITH RECURSIVE r(x) AS \
+            (SELECT 1 UNION ALL SELECT x%2B1 FROM r) SELECT x FROM r)";
+        let uri = format!("/images/rows?sql={}", endless.replace(' ', "%20"));
+        let (_, rows) = get(&app, &uri).await;
+        assert!(rows.contains("SQL: interrupted"), "{rows}");
+    }
+
+    #[tokio::test]
     async fn another_sites_name_needs_the_password() {
         let tmp = tempfile::tempdir().unwrap();
         let get_as = |host: &str| {
@@ -787,6 +803,10 @@ mod tests {
         wait_idle(&app).await;
         assert!(root.join("holiday.jpg").exists());
         assert!(root.join("backup/preview.jpg").exists());
+        // Nor from a folder that holds the root.
+        post(&app, "/batch/clean", &clean(tmp.path())).await;
+        wait_idle(&app).await;
+        assert!(root.join("holiday.jpg").exists());
         post(&app, "/batch/clean", &clean(&root.join("backup"))).await;
         wait_idle(&app).await;
         assert!(!root.join("backup/preview.jpg").exists());

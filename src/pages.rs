@@ -23,7 +23,7 @@ type Page = Result<Markup, AppError>;
 const PAGE_ROWS: usize = 200;
 const LOG_LINES: usize = 500;
 /// How long an SQL condition of the Images page may run.
-const SQL_SECONDS: u64 = 10;
+const SQL_SECONDS: u64 = if cfg!(test) { 1 } else { 10 };
 
 const SQL_HELP: &str = "SQLite condition on the fitsFile table (the part after WHERE), combined with the search.\n\
 \n\
@@ -1239,11 +1239,16 @@ async fn batch_clean(State(app): State<App>, Form(f): Form<CleanForm>) -> Redire
         return Redirect::to("/batch");
     }
     let dry_run = f.mode != "delete";
-    // It deletes every JPG and PNG, and the picker's root is often a whole share.
-    if !dry_run && dir.canonicalize().ok() == app.root.canonicalize().ok() {
+    // It deletes every JPG and PNG, and the picker's root (or a folder
+    // holding it) is often a whole share.
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    if !dry_run && real(&app.root).starts_with(real(&dir)) {
         app.jobs.note(
             true,
-            format!("Clean previews: choose a folder inside {}", dir.display()),
+            format!(
+                "Clean previews: choose a folder inside {}",
+                app.root.display()
+            ),
         );
         return Redirect::to("/batch");
     }
@@ -1667,7 +1672,7 @@ async fn settings_save(State(app): State<App>, Form(f): Form<SettingsForm>) -> R
         Ok(()) => app.jobs.note(false, "Settings saved".into()),
         Err(e) => app
             .jobs
-            .note(true, format!("Could not save settings: {e:#}")),
+            .note(true, format!("Settings saved, except: {e:#}")),
     }
     Redirect::to("/settings")
 }
