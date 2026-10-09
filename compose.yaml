@@ -3,6 +3,8 @@ services:
     image: ntmb/astrofiler-web:latest
     container_name: astrofiler
     restart: unless-stopped
+    # Time for a running task to stop cleanly (Docker's default is 10 seconds).
+    stop_grace_period: 2m
     # The NAS user and group that own the share (run `id` over SSH to find them).
     user: "1026:100"
     ports:

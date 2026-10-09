@@ -85,7 +85,7 @@ impl Jobs {
         if inner.running.iter().any(|j| j.name == name)
             || inner.queued.iter().any(|q| q.name == name)
         {
-            push_note(&mut inner, false, format!("{name} is already running"));
+            push_note(&mut inner, true, format!("{name} is already running"));
             return;
         }
         if writes && inner.running.iter().any(|j| j.writes) {
@@ -178,8 +178,22 @@ impl Jobs {
         }
     }
 
-    pub fn generation(&self) -> u64 {
-        self.0.inner.lock().unwrap().generation
+    /// For when the server stops: nothing waiting starts, running tasks are
+    /// asked to stop, and this returns once they have.
+    pub fn shutdown(&self) {
+        loop {
+            {
+                let mut inner = self.0.inner.lock().unwrap();
+                inner.queued.clear();
+                if inner.running.is_empty() {
+                    return;
+                }
+                for j in &inner.running {
+                    j.state.cancel.store(true, Ordering::SeqCst);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 
     #[cfg(test)]
@@ -215,4 +229,39 @@ fn push_note(inner: &mut Inner, failed: bool, text: String) {
     inner.notes.push_front((failed, text));
     inner.notes.truncate(KEEP_NOTES);
     inner.generation += 1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn one_writer_at_a_time_and_one_task_per_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jobs = Jobs::new(Arc::default(), tmp.path().join("t.db"));
+        let (release, held) = mpsc::channel::<()>();
+        let (started, second) = mpsc::channel::<()>();
+        jobs.spawn("first", move |_, _, _| {
+            held.recv().ok();
+            Ok(String::new())
+        });
+        jobs.spawn("second", move |_, _, _| {
+            started.send(()).ok();
+            Ok(String::new())
+        });
+        jobs.spawn("second", |_, _, _| panic!("ran twice"));
+
+        let s = jobs.snapshot();
+        assert_eq!(s.queued, ["second"]);
+        assert_eq!(s.notes[0], (true, "second is already running".to_string()));
+        assert!(second.try_recv().is_err());
+
+        release.send(()).unwrap();
+        second
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        jobs.shutdown();
+        assert!(jobs.idle());
+    }
 }

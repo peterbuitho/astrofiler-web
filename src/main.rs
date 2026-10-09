@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use astrofiler::config::Config;
 use astrofiler::{db, logging};
 use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
@@ -107,8 +107,20 @@ where
     Ok(tokio::task::spawn_blocking(f).await??)
 }
 
+/// A form posted by a page of another site. The browser would send it with
+/// the password, and the pages can delete files.
+fn cross_site(req: &Request) -> bool {
+    let h = |k: header::HeaderName| req.headers().get(k).and_then(|v| v.to_str().ok());
+    req.method() == Method::POST
+        && h(header::ORIGIN)
+            .is_some_and(|o| o.split_once("://").map(|(_, host)| host) != h(header::HOST))
+}
+
 /// HTTP basic auth with any user name, when a password is set.
 async fn auth(State(app): State<App>, req: Request, next: Next) -> Response {
+    if cross_site(&req) {
+        return (StatusCode::FORBIDDEN, "Request from another site refused").into_response();
+    }
     let Some(password) = &app.password else {
         return next.run(req).await;
     };
@@ -196,9 +208,12 @@ async fn main() -> Result<()> {
     println!("{started}");
     log::info!("{started}");
     nightly::start(app.clone());
+    let jobs = app.jobs.clone();
     axum::serve(listener, router(app))
         .with_graceful_shutdown(shutdown())
         .await?;
+    // A task cut off half-way leaves the catalogue disagreeing with the disk.
+    jobs.shutdown();
     Ok(())
 }
 
@@ -695,5 +710,23 @@ mod tests {
         );
         assert_eq!(post(&app, "/settings", &form).await, StatusCode::SEE_OTHER);
         assert!(app.cfg().object_names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forms_from_another_site_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let post_from = |origin: &str| {
+            HttpRequest::post("/jobs/cancel")
+                .header(header::HOST, "nas:8080")
+                .header(header::ORIGIN, origin)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("name=x"))
+                .unwrap()
+        };
+        let status = send(&app, post_from("http://evil.example")).await.0;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let status = send(&app, post_from("http://nas:8080")).await.0;
+        assert_eq!(status, StatusCode::SEE_OTHER);
     }
 }

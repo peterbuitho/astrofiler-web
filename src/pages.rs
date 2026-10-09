@@ -166,7 +166,7 @@ async fn images(State(app): State<App>) -> Markup {
                     { "Delete files from disk…" }
             }
             div id="rows" hx-get="/images/rows" hx-include="#q,#sql,#kind,#group,#sort,#desc,#page"
-                hx-trigger="load, input changed delay:300ms from:#q, change from:#kind, change from:#group, change from:#sql, reload, refresh from:body" {}
+                hx-trigger="load, input changed delay:300ms from:#q, change from:#kind, change from:#group, change from:#sql, reload, refresh[!document.querySelector('input.row:checked')] from:body" {}
             dialog id="sqlhelp" {
                 pre class="log" { (SQL_HELP) }
                 p { button type="button" onclick="el('sqlhelp').close()" { "Close" } }
@@ -973,11 +973,11 @@ async fn sessions_create(State(app): State<App>) -> Redirect {
     Redirect::to("/sessions")
 }
 
-async fn sessions_clear(State(app): State<App>) -> Result<Redirect, AppError> {
-    let a = app.clone();
-    let n = blocking(move || sessions::clear_all(&mut a.conn()?)).await?;
-    app.jobs.note(false, format!("{n} sessions removed"));
-    Ok(Redirect::to("/sessions"))
+async fn sessions_clear(State(app): State<App>) -> Redirect {
+    app.jobs.spawn("Clear sessions", |conn, _, _| {
+        Ok(format!("{} sessions removed", sessions::clear_all(conn)?))
+    });
+    Redirect::to("/sessions")
 }
 
 #[derive(Deserialize)]
@@ -1172,7 +1172,8 @@ async fn batch_run(State(app): State<App>, Form(f): Form<RunForm>) -> Redirect {
                 batch::remove_missing(conn, p)?
             ))
         }),
-        "empty_dirs" => jobs.spawn_read("Remove empty folders", |_, cfg, _| {
+        // Queued with the writers: a load's new folder is empty until its file arrives.
+        "empty_dirs" => jobs.spawn("Remove empty folders", |_, cfg, _| {
             Ok(format!(
                 "{} empty folders removed",
                 batch::remove_empty_dirs(&cfg.repo)
@@ -1223,6 +1224,14 @@ async fn batch_clean(State(app): State<App>, Form(f): Form<CleanForm>) -> Redire
         return Redirect::to("/batch");
     }
     let dry_run = f.mode != "delete";
+    // It deletes every JPG and PNG, and the picker's root is often a whole share.
+    if !dry_run && dir.canonicalize().ok() == app.root.canonicalize().ok() {
+        app.jobs.note(
+            true,
+            format!("Clean previews: choose a folder inside {}", dir.display()),
+        );
+        return Redirect::to("/batch");
+    }
     app.jobs.spawn_read("Clean previews", move |_, _, _| {
         let (files, bytes) = batch::clean_previews(&dir, dry_run)?;
         Ok(if dry_run {

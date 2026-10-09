@@ -66,6 +66,16 @@ There is no login unless a password is set, and the pages can delete files.
 Keep it on your home network. The password is sent unencrypted over plain
 HTTP.
 
+Forms posted from another website are refused, so a page you visit can't
+press the buttons for you. Behind a reverse proxy, have the proxy pass the
+`Host` header on unchanged, or every button answers "403".
+
+"Delete previews" removes every JPG and PNG under the folder you give it, so
+it refuses the folder picker's root (`ASTROFILER_WEB_ROOT`).
+
+When the container stops, running tasks are asked to stop and the server
+waits for them; `compose.yaml` gives it two minutes before Docker ends it.
+
 ## Develop
 
 ```
