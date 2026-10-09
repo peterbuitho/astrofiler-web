@@ -15,7 +15,7 @@ base64 = "0.22"
 chrono = "0.4"
 log = "0.4"
 maud = { version = "0.27", features = ["axum"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "fs"] }
 tokio-util = { version = "0.7", features = ["io"] }

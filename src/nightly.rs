@@ -50,12 +50,13 @@ enum Folder {
 fn look(dir: &Path, now: SystemTime) -> Folder {
     let mut found = (0, None);
     newest(dir, &mut found);
+    let quiet = Duration::minutes(QUIET_MINUTES);
+    let now = DateTime::<Local>::from(now);
     match found {
         (0, _) => Folder::Empty,
-        (_, Some(t))
-            if DateTime::<Local>::from(t) + Duration::minutes(QUIET_MINUTES)
-                > DateTime::<Local>::from(now) =>
-        {
+        // A time well in the future is a telescope with a wrong clock, not
+        // a file that is still arriving.
+        (_, Some(t)) if (now - quiet..now + quiet).contains(&DateTime::<Local>::from(t)) => {
             Folder::Busy
         }
         _ => Folder::Ready,
@@ -159,5 +160,8 @@ mod tests {
         assert!(matches!(look(tmp.path(), now), Folder::Busy));
         let later = now + std::time::Duration::from_secs(16 * 60);
         assert!(matches!(look(tmp.path(), later), Folder::Ready));
+        // A file dated in the future does not hold the load up.
+        let earlier = now - std::time::Duration::from_secs(16 * 60);
+        assert!(matches!(look(tmp.path(), earlier), Folder::Ready));
     }
 }

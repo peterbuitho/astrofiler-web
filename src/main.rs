@@ -116,12 +116,34 @@ fn cross_site(req: &Request) -> bool {
             .is_some_and(|o| o.split_once("://").map(|(_, host)| host) != h(header::HOST))
 }
 
+/// Whether the address the browser used is one a home network gives this
+/// machine: an IP address, a plain name ("nas") or a ".local" one. Another
+/// site's own name can be pointed at this machine, and then passes for it.
+fn home_name(host: &str) -> bool {
+    let name = host.rsplit_once(':').map_or(host, |(name, port)| {
+        if port.bytes().all(|b| b.is_ascii_digit()) {
+            name
+        } else {
+            host
+        }
+    });
+    name.starts_with('[')
+        || name.parse::<std::net::Ipv4Addr>().is_ok()
+        || !name.contains('.')
+        || name.ends_with(".local")
+}
+
 /// HTTP basic auth with any user name, when a password is set.
 async fn auth(State(app): State<App>, req: Request, next: Next) -> Response {
     if cross_site(&req) {
         return (StatusCode::FORBIDDEN, "Request from another site refused").into_response();
     }
     let Some(password) = &app.password else {
+        let host = req.headers().get(header::HOST);
+        if host.is_some_and(|h| !h.to_str().is_ok_and(home_name)) {
+            let why = "Set ASTROFILER_WEB_PASSWORD to use AstroFiler under this address";
+            return (StatusCode::FORBIDDEN, why).into_response();
+        }
         return next.run(req).await;
     };
     let given = req
@@ -728,5 +750,74 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         let status = send(&app, post_from("http://nas:8080")).await.0;
         assert_eq!(status, StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn another_sites_name_needs_the_password() {
+        let tmp = tempfile::tempdir().unwrap();
+        let get_as = |host: &str| {
+            HttpRequest::get("/log")
+                .header(header::HOST, host)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let open = test_app(tmp.path(), None);
+        for host in ["192.168.1.20:8080", "nas:8080", "nas.local", "[fe80::1]"] {
+            let status = send(&open, get_as(host)).await.0;
+            assert_eq!(status, StatusCode::OK, "{host}");
+        }
+        let status = send(&open, get_as("evil.example:8080")).await.0;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // The other site has no password to send, so the name doesn't matter.
+        let locked = test_app(tmp.path(), Some("secret"));
+        let status = send(&locked, get_as("evil.example:8080")).await.0;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn previews_are_not_deleted_from_the_whole_picker_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let root = tmp.path().join("astro");
+        std::fs::create_dir_all(root.join("backup")).unwrap();
+        std::fs::write(root.join("holiday.jpg"), b"photo").unwrap();
+        std::fs::write(root.join("backup/preview.jpg"), b"preview").unwrap();
+        let clean = |dir: &std::path::Path| format!("dir={}&mode=delete", dir.display());
+        post(&app, "/batch/clean", &clean(&root)).await;
+        wait_idle(&app).await;
+        assert!(root.join("holiday.jpg").exists());
+        assert!(root.join("backup/preview.jpg").exists());
+        post(&app, "/batch/clean", &clean(&root.join("backup"))).await;
+        wait_idle(&app).await;
+        assert!(!root.join("backup/preview.jpg").exists());
+        assert!(root.join("holiday.jpg").exists());
+    }
+
+    #[tokio::test]
+    async fn settings_are_saved_whole_and_keep_new_nicknames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let old = app.cfg_saved().repo;
+        // A nightly load without a time: nothing is saved, not even the file.
+        let form = format!(
+            "repo={}&on_conflict=skip&nightly=1&nightly_time=",
+            tmp.path().join("other").display()
+        );
+        assert_eq!(post(&app, "/settings", &form).await, StatusCode::SEE_OTHER);
+        assert_eq!(app.cfg_saved().repo, old);
+        assert!(!tmp.path().join("astrofiler.ini").exists());
+
+        // A nickname learned after the page was opened survives the save;
+        // one taken out of the list does not.
+        let nicks = || astrofiler::nick::load(&app.conn().unwrap());
+        let learned = [("C 7".to_string(), "Spiral Galaxy".to_string())];
+        astrofiler::nick::replace(&mut app.conn().unwrap(), &learned).unwrap();
+        let form = format!("repo={}&on_conflict=skip&nicknames=", old.display());
+        let unedited = format!("{form}&nicknames_shown=");
+        post(&app, "/settings", &unedited).await;
+        assert_eq!(nicks().len(), 1);
+        let removed = format!("{form}&nicknames_shown=C%207%20%3D%20Spiral%20Galaxy");
+        post(&app, "/settings", &removed).await;
+        assert!(nicks().is_empty());
     }
 }

@@ -22,6 +22,8 @@ type Page = Result<Markup, AppError>;
 
 const PAGE_ROWS: usize = 200;
 const LOG_LINES: usize = 500;
+/// How long an SQL condition of the Images page may run.
+const SQL_SECONDS: u64 = 10;
 
 const SQL_HELP: &str = "SQLite condition on the fitsFile table (the part after WHERE), combined with the search.\n\
 \n\
@@ -53,6 +55,13 @@ fn sql_ids(app: &App, clause: &str) -> anyhow::Result<Option<std::collections::H
     }
     let conn = app.conn()?;
     conn.pragma_update(None, "query_only", true)?;
+    // A condition that compares every file with every other would run for
+    // minutes, and again on each reload of the table.
+    let started = std::time::Instant::now();
+    conn.progress_handler(
+        10_000,
+        Some(move || started.elapsed() > std::time::Duration::from_secs(SQL_SECONDS)),
+    );
     // The newline keeps a trailing -- comment from swallowing the bracket.
     let mut stmt = conn.prepare(&format!(
         "SELECT fitsFileId FROM fitsFile WHERE COALESCE(fitsFileSoftDelete,0)=0 AND (\n{clause}\n)"
@@ -230,10 +239,11 @@ fn group_key(f: &FitsFile, by: &str) -> String {
 fn matching(
     app: &App,
     files: &[FitsFile],
+    names: &std::collections::BTreeMap<String, String>,
     f: &Filter,
     sql: &str,
 ) -> anyhow::Result<Result<Vec<usize>, String>> {
-    let mut idx = filter::apply(files, &app.cfg().object_names, f);
+    let mut idx = filter::apply(files, names, f);
     match sql_ids(app, sql) {
         Ok(Some(ids)) => idx.retain(|&i| ids.contains(&files[i].id)),
         Ok(None) => {}
@@ -265,6 +275,7 @@ enum Rows {
         by: String,
         groups: Vec<Group>,
         shown: usize,
+        names: std::collections::BTreeMap<String, String>,
     },
 }
 
@@ -278,7 +289,8 @@ async fn image_rows(State(app): State<App>, Query(query): Query<RowsQuery>) -> P
             sort: query.sort,
             desc: !query.desc.is_empty(),
         };
-        let idx = match matching(&a, &files, &f, &query.sql)? {
+        let names = a.cfg().object_names;
+        let idx = match matching(&a, &files, &names, &f, &query.sql)? {
             Ok(idx) => idx,
             Err(e) => return Ok(Err(e)),
         };
@@ -359,6 +371,7 @@ async fn image_rows(State(app): State<App>, Query(query): Query<RowsQuery>) -> P
             by,
             groups,
             shown: idx.len(),
+            names,
         }))
     })
     .await?;
@@ -383,8 +396,12 @@ async fn image_rows(State(app): State<App>, Query(query): Query<RowsQuery>) -> P
                 (file_table(&app, &files, false))
             }
         },
-        Rows::Groups { by, groups, shown } => {
-            let names = app.cfg().object_names.clone();
+        Rows::Groups {
+            by,
+            groups,
+            shown,
+            names,
+        } => {
             html! {
                 div class="toolbar" {
                     span { (shown) " files in " (groups.len()) " groups" }
@@ -772,15 +789,16 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
         "in_place" => Placement::InPlace,
         _ => Placement::Move,
     };
+    let cfg = app.cfg();
     let opts = IngestOptions {
         placement,
         dry_run: ticked(&f.dry_run),
-        on_conflict: OnConflict::parse(&f.on_conflict).unwrap_or(app.cfg().on_conflict),
+        on_conflict: OnConflict::parse(&f.on_conflict).unwrap_or(cfg.on_conflict),
         quick: false,
         object_from_folder: ticked(&f.object_from_folder),
     };
     if placement == Placement::Move {
-        if let Some(why) = filed_already(&app.cfg(), &src) {
+        if let Some(why) = filed_already(&cfg, &src) {
             app.jobs.note(true, format!("Load: {why}"));
             return Redirect::to("/load");
         }
@@ -823,9 +841,6 @@ pub fn run_load(
             anyhow::bail!(why);
         }
     }
-    // Files a sync catalogued where they lie would be taken for
-    // "loaded before" and left there. Forget them first, so the move
-    // files them like new ones.
     let r = ingest::ingest_folder(conn, cfg, src, opts, p)?;
     if opts.dry_run {
         for (a, b) in &r.placed {
@@ -1568,6 +1583,8 @@ async fn settings(State(app): State<App>) -> Markup {
                 div {
                     p class="muted" { "Names you gave objects yourself. They are picked up from the folder you load and the pictures in it (\"C 7 Spiral Galaxy\"), for objects that have no name above or built in, and are kept in the catalogue. Correct them here; to stop using one, add the object with an empty name (\"C 7 =\") to the object names above." }
                     textarea name="nicknames" rows="8" cols="50" { (nicknames) }
+                    // What the page showed: a load may learn more before it is saved.
+                    input type="hidden" name="nicknames_shown" value=(nicknames);
                     p class="muted" { "After saving, use Batch > Folder layout to rename existing folders." }
                 }
                 label { "Statistics names" }
@@ -1594,6 +1611,7 @@ struct SettingsForm {
     nightly_time: String,
     object_names: String,
     nicknames: String,
+    nicknames_shown: Vec<String>,
     stats_names: String,
 }
 
@@ -1615,13 +1633,30 @@ async fn settings_save(State(app): State<App>, Form(f): Form<SettingsForm>) -> R
         .into_iter()
         .filter(|(_, n)| !n.is_empty())
         .collect();
+    let nightly = ticked(&f.nightly).then(|| parse_time(&f.nightly_time));
+    if nightly == Some(None) {
+        app.jobs.note(
+            true,
+            "Settings not saved: the nightly load needs a time".into(),
+        );
+        return Redirect::to("/settings");
+    }
+    // Nicknames left as the page showed them are not written back: a load
+    // may have learned more since.
+    let lines = |s: &str| s.replace('\r', "").trim().to_string();
+    let edited = f
+        .nicknames_shown
+        .first()
+        .is_none_or(|shown| lines(shown) != lines(&f.nicknames));
     let saved = c.save().and_then(|()| {
-        nick::replace(&mut app.conn()?, &nicknames)?;
+        // The file is written, so the program follows it whatever fails below.
+        *app.cfg.write().unwrap() = c;
+        if edited {
+            nick::replace(&mut app.conn()?, &nicknames)?;
+        }
         let text = f.stats_names.replace("\r\n", "\n");
         std::fs::write(stats_names_path(&app), text)?;
-        if ticked(&f.nightly) {
-            let (h, m) = parse_time(&f.nightly_time)
-                .ok_or_else(|| anyhow::anyhow!("nightly load: no time given"))?;
+        if let Some(Some((h, m))) = nightly {
             std::fs::write(nightly_path(&app), format!("{h:02}:{m:02}\n"))?;
         } else if nightly_path(&app).exists() {
             std::fs::remove_file(nightly_path(&app))?;
@@ -1629,10 +1664,7 @@ async fn settings_save(State(app): State<App>, Form(f): Form<SettingsForm>) -> R
         Ok(())
     });
     match saved {
-        Ok(()) => {
-            *app.cfg.write().unwrap() = c;
-            app.jobs.note(false, "Settings saved".into());
-        }
+        Ok(()) => app.jobs.note(false, "Settings saved".into()),
         Err(e) => app
             .jobs
             .note(true, format!("Could not save settings: {e:#}")),

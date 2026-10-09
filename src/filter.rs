@@ -53,7 +53,7 @@ pub fn apply(
         .keys()
         .flat_map(|o| [names::key(o), names::key(&names::mosaic(o).0)])
         .collect();
-    let clauses: Vec<(Option<String>, Vec<&str>)> = q
+    let clauses: Vec<(Option<String>, Vec<String>)> = q
         .split(',')
         .map(|part| {
             let mut terms: Vec<&str> = part.split_whitespace().collect();
@@ -66,14 +66,16 @@ pub fn apply(
                     break;
                 }
             }
+            let mut terms: Vec<String> = terms.into_iter().map(String::from).collect();
             // A catalogue designation that is not in the repository ("C 36")
-            // matches nothing, instead of falling back to loose word matching.
+            // is looked for as one word ("c36"), not as loose words: "36"
+            // alone is in many times and temperatures. A C8 telescope is
+            // still found by its name.
             if object.is_none() {
                 for n in 1..=terms.len().min(2) {
                     let k = names::key(&terms[..n].join(" "));
                     if is_designation(&k) {
-                        object = Some(k);
-                        terms.drain(..n);
+                        terms.splice(..n, [k.to_lowercase()]);
                         break;
                     }
                 }
@@ -190,5 +192,22 @@ mod tests {
         // A mosaic's name finds all its panels; a panel's name just that one.
         assert_eq!(run("hd 199479", "all"), vec![4, 5]);
         assert_eq!(run("HD 199479(2)", "all"), vec![5]);
+    }
+
+    #[test]
+    fn a_designation_that_is_no_object_is_still_a_word_to_find() {
+        let mut c8 = file("M 31", "LIGHT", "L", "2026-09-01T22:00:00");
+        c8.telescope = Some("C8".into());
+        let files = vec![c8, file("M 33", "LIGHT", "L", "2026-09-08T22:00:00")];
+        let run = |q: &str| {
+            let f = Filter {
+                q: q.into(),
+                ..Default::default()
+            };
+            apply(&files, &BTreeMap::new(), &f)
+        };
+        assert_eq!(run("c8"), vec![0]);
+        assert_eq!(run("C 8"), vec![0]);
+        assert!(run("c 36").is_empty());
     }
 }

@@ -70,6 +70,12 @@ Forms posted from another website are refused, so a page you visit can't
 press the buttons for you. Behind a reverse proxy, have the proxy pass the
 `Host` header on unchanged, or every button answers "403".
 
+Without a password the pages only answer under an address a home network
+gives the NAS: its IP address, a plain name (`nas`) or a `.local` name. Under
+any other name (a domain, a VPN name such as `nas.example.ts.net`) they answer
+"403" until `ASTROFILER_WEB_PASSWORD` is set, because another website's name
+can be pointed at the NAS too.
+
 "Delete previews" removes every JPG and PNG under the folder you give it, so
 it refuses the folder picker's root (`ASTROFILER_WEB_ROOT`).
 

@@ -35,6 +35,8 @@ struct Inner {
     notes: VecDeque<(bool, String)>,
     /// Goes up whenever something finished, so open pages know to reload.
     generation: u64,
+    /// The server is stopping: nothing new starts.
+    stopping: bool,
 }
 
 /// What the job panel shows.
@@ -82,6 +84,9 @@ impl Jobs {
 
     pub fn submit(&self, name: &str, writes: bool, work: Work) {
         let mut inner = self.0.inner.lock().unwrap();
+        if inner.stopping {
+            return;
+        }
         if inner.running.iter().any(|j| j.name == name)
             || inner.queued.iter().any(|q| q.name == name)
         {
@@ -184,6 +189,7 @@ impl Jobs {
         loop {
             {
                 let mut inner = self.0.inner.lock().unwrap();
+                inner.stopping = true;
                 inner.queued.clear();
                 if inner.running.is_empty() {
                     return;
@@ -262,6 +268,9 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         jobs.shutdown();
+        assert!(jobs.idle());
+        // The nightly load's clock may still tick while the server stops.
+        jobs.spawn("late", |_, _, _| panic!("started while stopping"));
         assert!(jobs.idle());
     }
 }
