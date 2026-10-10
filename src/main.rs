@@ -475,7 +475,10 @@ mod tests {
             wait_idle(&app).await;
             assert!(filed.is_file());
             let notes = app.jobs.snapshot().notes;
-            assert!(notes[0].0 && notes[0].1.contains("Light folder"), "{notes:?}");
+            assert!(
+                notes[0].0 && notes[0].1.contains("Light folder"),
+                "{notes:?}"
+            );
         }
         assert_eq!(db::all_files(&app.conn().unwrap(), false).unwrap().len(), 1);
     }
@@ -811,6 +814,30 @@ mod tests {
         wait_idle(&app).await;
         assert!(!root.join("backup/preview.jpg").exists());
         assert!(root.join("holiday.jpg").exists());
+    }
+
+    #[tokio::test]
+    async fn duplicates_that_differ_are_kept_and_said_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let inbox = tmp.path().join("astro/inbox");
+        frame(&inbox, "a.fits", "M 31", "2026-09-01T21:00:00");
+        frame(&inbox, "bb.fits", "M 31", "2026-09-01T21:01:00");
+        let form = format!("folder={}&placement=move&on_conflict=skip", inbox.display());
+        post(&app, "/load", &form).await;
+        wait_idle(&app).await;
+        // A stale checksum makes two different files look the same.
+        let conn = app.conn().unwrap();
+        conn.execute("UPDATE fitsFile SET fitsFileHash='stale'", [])
+            .unwrap();
+        post(&app, "/duplicates/remove", "").await;
+        wait_idle(&app).await;
+        let files = db::all_files(&conn, false).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|f| std::path::Path::new(&f.name).exists()));
+        let note = &app.jobs.snapshot().notes[0].1;
+        assert!(note.contains("0 files removed"), "{note}");
+        assert!(note.contains("1 not removed (see Log)"), "{note}");
     }
 
     #[tokio::test]

@@ -1303,7 +1303,16 @@ async fn duplicates(State(app): State<App>) -> Page {
 async fn duplicates_remove(State(app): State<App>) -> Redirect {
     app.jobs.spawn("Remove duplicates", |conn, _, _| {
         let (n, b) = batch::remove_duplicates(conn)?;
-        Ok(format!("{n} files removed, {} freed", util::human_size(b)))
+        let mut summary = format!("{n} files removed, {} freed", util::human_size(b));
+        // Copies that turned out to differ from the kept file are left alone.
+        let left: usize = batch::duplicate_groups(conn)?
+            .iter()
+            .map(|g| g.len() - 1)
+            .sum();
+        if left > 0 {
+            summary.push_str(&format!(", {left} not removed (see Log)"));
+        }
+        Ok(summary)
     });
     Redirect::to("/duplicates")
 }

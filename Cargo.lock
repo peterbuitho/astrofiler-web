@@ -140,8 +140,8 @@ dependencies = [
 
 [[package]]
 name = "astrofiler"
-version = "0.8.4"
-source = "git+https://github.com/peterbuitho/astrofiler-rs#670c668502149ca9ac9698dba943d7127943b4b3"
+version = "0.8.6"
+source = "git+https://github.com/peterbuitho/astrofiler-rs#3e07244f7323cf1ec2611a7cc29011d202510163"
 dependencies = [
  "anyhow",
  "base64",
@@ -153,7 +153,6 @@ dependencies = [
  "indicatif",
  "log",
  "lz4_flex 0.11.6",
- "md-5 0.10.6",
  "rayon",
  "roxmltree",
  "rusqlite",
@@ -1192,16 +1191,6 @@ dependencies = [
 
 [[package]]
 name = "md-5"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
-dependencies = [
- "cfg-if",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "md-5"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
@@ -1707,7 +1696,7 @@ dependencies = [
  "hmac",
  "log",
  "lz4_flex 0.14.0",
- "md-5 0.11.0",
+ "md-5",
  "md4",
  "num_enum",
  "pbkdf2",
