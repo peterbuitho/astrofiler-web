@@ -229,6 +229,10 @@ async fn main() -> Result<()> {
     );
     println!("{started}");
     log::info!("{started}");
+    // The first Images page reads the whole catalogue; read it now, so it
+    // comes from memory instead of a cold disk.
+    let warm = app.clone();
+    tokio::task::spawn_blocking(move || warm.conn().and_then(|c| db::all_files(&c, false)));
     nightly::start(app.clone());
     let jobs = app.jobs.clone();
     axum::serve(listener, router(app))

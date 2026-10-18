@@ -175,7 +175,9 @@ async fn images(State(app): State<App>) -> Markup {
                     { "Delete files from disk…" }
             }
             div id="rows" hx-get="/images/rows" hx-include="#q,#sql,#kind,#group,#sort,#desc,#page"
-                hx-trigger="load, input changed delay:300ms from:#q, change from:#kind, change from:#group, change from:#sql, reload, refresh[!document.querySelector('input.row:checked')] from:body" {}
+                hx-trigger="load, input changed delay:300ms from:#q, change from:#kind, change from:#group, change from:#sql, reload, refresh[!document.querySelector('input.row:checked')] from:body" {
+                    p class="muted" { "Loading the catalogue…" }
+                }
             dialog id="sqlhelp" {
                 pre class="log" { (SQL_HELP) }
                 p { button type="button" onclick="el('sqlhelp').close()" { "Close" } }
