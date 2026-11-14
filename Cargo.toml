@@ -7,7 +7,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/peterbuitho/astrofiler-web"
 
 [dependencies]
-astrofiler = { git = "https://github.com/peterbuitho/astrofiler-rs", default-features = false }
+astrofiler = { git = "https://github.com/peterbuitho/astrofiler-rs", tag = "v0.8.8", default-features = false }
 anyhow = "1"
 axum = "0.8"
 axum-extra = { version = "0.12", features = ["form", "query"] }

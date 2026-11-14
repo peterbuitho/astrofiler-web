@@ -140,8 +140,8 @@ dependencies = [
 
 [[package]]
 name = "astrofiler"
-version = "0.8.6"
-source = "git+https://github.com/peterbuitho/astrofiler-rs#3e07244f7323cf1ec2611a7cc29011d202510163"
+version = "0.8.8"
+source = "git+https://github.com/peterbuitho/astrofiler-rs?tag=v0.8.8#8260106f8e55950a1c5773bf3212ef8d7ba62ba7"
 dependencies = [
  "anyhow",
  "base64",
