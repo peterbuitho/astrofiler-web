@@ -806,12 +806,16 @@ async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect
         }
     }
     let remove_known = ticked(&f.remove_known) && placement == Placement::Move && !opts.dry_run;
+    let dry_run = opts.dry_run;
     app.jobs.submit(
-        if opts.dry_run { "Dry run" } else { "Load" },
-        !opts.dry_run,
+        if dry_run { "Dry run" } else { "Load" },
+        !dry_run,
         Box::new(move |conn, cfg, p| run_load(conn, cfg, p, &src, opts, remove_known)),
     );
-    Redirect::to("/images")
+    // A dry run leaves everything in place: stay on this page, where the job
+    // panel shows its summary (and the dry run tick is cleared). A real load
+    // goes to the Images page, where the newly filed frames are.
+    Redirect::to(if dry_run { "/load" } else { "/images" })
 }
 
 /// Why nothing is moved (or deleted) out of `src`: it is one of the

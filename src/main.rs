@@ -310,6 +310,22 @@ mod tests {
         send(app, req).await.0
     }
 
+    /// The Location a POSTed form redirects to.
+    async fn location(app: &App, uri: &str, form: &str) -> String {
+        let req = HttpRequest::post(uri)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form.to_string()))
+            .unwrap();
+        let res = router(app.clone()).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        res.headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
     async fn wait_idle(app: &App) {
         for _ in 0..500 {
             if app.jobs.idle() {
@@ -427,6 +443,34 @@ mod tests {
         // Only the file that was removed from the catalogue is still there.
         let on_disk = astrofiler::ingest::collect_files(&tmp.path().join("astro/repo"), &[]);
         assert_eq!(on_disk.len(), 1, "{on_disk:?}");
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_stays_on_the_load_page() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let inbox = tmp.path().join("astro/inbox");
+        frame(&inbox, "a.fits", "M 31", "2026-09-01T21:00:00");
+        let form = |extra: &str| {
+            format!(
+                "folder={}&placement=move&on_conflict=skip{extra}",
+                inbox.display()
+            )
+        };
+
+        // A dry run stays on the Load page and leaves everything in place.
+        assert_eq!(location(&app, "/load", &form("&dry_run=1")).await, "/load");
+        wait_idle(&app).await;
+        assert!(inbox.join("a.fits").exists());
+        assert!(db::all_files(&app.conn().unwrap(), false)
+            .unwrap()
+            .is_empty());
+
+        // A real load goes to the Images page, where the frames now are.
+        assert_eq!(location(&app, "/load", &form("")).await, "/images");
+        wait_idle(&app).await;
+        assert!(!inbox.join("a.fits").exists());
+        assert_eq!(db::all_files(&app.conn().unwrap(), false).unwrap().len(), 1);
     }
 
     #[tokio::test]
