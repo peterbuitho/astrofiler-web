@@ -1,3 +1,9 @@
 target
 .git
 .ua/
+.claude
+.DS_Store
+.github
+README.md
+AUDIT.md
+compose.yaml

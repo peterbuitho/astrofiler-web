@@ -88,6 +88,7 @@ pub struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        log::error!("request failed: {:#}", self.0);
         (StatusCode::INTERNAL_SERVER_ERROR, format!("{:#}", self.0)).into_response()
     }
 }
@@ -107,62 +108,160 @@ where
     Ok(tokio::task::spawn_blocking(f).await??)
 }
 
+fn with_security_headers(mut res: Response) -> Response {
+    let h = res.headers_mut();
+    h.insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("DENY"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("same-origin"),
+    );
+    res
+}
+
+fn url_authority(url: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    Some((scheme, &rest[..end]))
+}
+
+fn strip_default_port<'a>(scheme: &str, authority: &'a str) -> &'a str {
+    if scheme.eq_ignore_ascii_case("http") {
+        authority.strip_suffix(":80").unwrap_or(authority)
+    } else if scheme.eq_ignore_ascii_case("https") {
+        authority.strip_suffix(":443").unwrap_or(authority)
+    } else {
+        authority
+    }
+}
+
+fn same_origin_host(url: &str, host: &str) -> bool {
+    let Some((scheme, authority)) = url_authority(url) else {
+        return false;
+    };
+    strip_default_port(scheme, authority).eq_ignore_ascii_case(strip_default_port(scheme, host))
+}
+
 /// A form posted by a page of another site. The browser would send it with
 /// the password, and the pages can delete files.
 fn cross_site(req: &Request) -> bool {
+    if req.method() != Method::POST {
+        return false;
+    }
     let h = |k: header::HeaderName| req.headers().get(k).and_then(|v| v.to_str().ok());
-    req.method() == Method::POST
-        && h(header::ORIGIN)
-            .is_some_and(|o| o.split_once("://").map(|(_, host)| host) != h(header::HOST))
+    let sfs = req
+        .headers()
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok());
+    if sfs.is_some_and(|v| v.eq_ignore_ascii_case("cross-site")) {
+        return true;
+    }
+    let host = h(header::HOST);
+    if let Some(origin) = h(header::ORIGIN) {
+        return host.is_none_or(|host| !same_origin_host(origin, host));
+    }
+    if let (Some(referer), Some(host)) = (h(header::REFERER), host) {
+        return !same_origin_host(referer, host);
+    }
+    false
 }
 
 /// Whether the address the browser used is one a home network gives this
 /// machine: an IP address, a plain name ("nas") or a ".local" one. Another
 /// site's own name can be pointed at this machine, and then passes for it.
 fn home_name(host: &str) -> bool {
+    if let Some(after_open) = host.strip_prefix('[') {
+        let Some((inner, rest)) = after_open.split_once(']') else {
+            return false;
+        };
+        let port_ok = rest.is_empty()
+            || rest
+                .strip_prefix(':')
+                .is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        if !port_ok {
+            return false;
+        }
+        let ip = match inner.split_once('%') {
+            Some((_, "")) => return false,
+            Some((ip, _)) => ip,
+            None => inner,
+        };
+        return ip.parse::<std::net::Ipv6Addr>().is_ok();
+    }
     let name = host.rsplit_once(':').map_or(host, |(name, port)| {
-        if port.bytes().all(|b| b.is_ascii_digit()) {
+        if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
             name
         } else {
             host
         }
     });
-    name.starts_with('[')
-        || name.parse::<std::net::Ipv4Addr>().is_ok()
-        || !name.contains('.')
-        || name.ends_with(".local")
+    name.parse::<std::net::Ipv4Addr>().is_ok()
+        || (!name.is_empty() && !name.contains('.'))
+        || name.to_ascii_lowercase().ends_with(".local")
+}
+
+fn eq_ct(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = u8::from(a.len() != b.len());
+    for i in 0..a.len().max(b.len()) {
+        let x = *a.get(i).unwrap_or(&0);
+        let y = *b.get(i).unwrap_or(&0);
+        diff |= x ^ y;
+    }
+    std::hint::black_box(diff) == 0
 }
 
 /// HTTP basic auth with any user name, when a password is set.
 async fn auth(State(app): State<App>, req: Request, next: Next) -> Response {
     if cross_site(&req) {
-        return (StatusCode::FORBIDDEN, "Request from another site refused").into_response();
+        return with_security_headers(
+            (StatusCode::FORBIDDEN, "Request from another site refused").into_response(),
+        );
     }
     let Some(password) = &app.password else {
         let host = req.headers().get(header::HOST);
         if host.is_some_and(|h| !h.to_str().is_ok_and(home_name)) {
             let why = "Set ASTROFILER_WEB_PASSWORD to use AstroFiler under this address";
-            return (StatusCode::FORBIDDEN, why).into_response();
+            return with_security_headers((StatusCode::FORBIDDEN, why).into_response());
         }
-        return next.run(req).await;
+        return with_security_headers(next.run(req).await);
     };
     let given = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Basic "))
-        .and_then(|v| base64::engine::general_purpose::STANDARD.decode(v).ok())
+        .and_then(|v| v.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("basic"))
+        .and_then(|(_, creds)| {
+            base64::engine::general_purpose::STANDARD
+                .decode(creds.trim())
+                .ok()
+        })
         .and_then(|v| String::from_utf8(v).ok())
         .and_then(|v| v.split_once(':').map(|(_, p)| p.to_string()));
-    if given.as_deref() == Some(password.as_str()) {
-        return next.run(req).await;
+    if given
+        .as_deref()
+        .is_some_and(|g| eq_ct(g.as_bytes(), password.as_bytes()))
+    {
+        return with_security_headers(next.run(req).await);
     }
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Basic realm=\"AstroFiler\"")],
-        "Password required",
+    with_security_headers(
+        (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"AstroFiler\"")],
+            "Password required",
+        )
+            .into_response(),
     )
-        .into_response()
 }
 
 pub fn router(app: App) -> axum::Router {
@@ -176,9 +275,10 @@ pub fn router(app: App) -> axum::Router {
 fn load_config() -> Result<Config> {
     let mut cfg = Config::load()?;
     if !cfg.path.exists() {
-        if let Ok(repo) = std::env::var("ASTROFILER_WEB_REPO") {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        if let Some(repo) = env("ASTROFILER_WEB_REPO") {
             cfg.repo = PathBuf::from(repo);
-            if let Ok(inbox) = std::env::var("ASTROFILER_WEB_INBOX") {
+            if let Some(inbox) = env("ASTROFILER_WEB_INBOX") {
                 cfg.source = PathBuf::from(inbox);
             }
             cfg.save()?;
@@ -196,12 +296,11 @@ async fn shutdown() {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     logging::init(std::env::var("ASTROFILER_WEB_VERBOSE").is_ok(), true);
     // File work reads that many files at once, by default one per core. On a
     // NAS that leaves nothing for the web pages, so cap it (RAYON_NUM_THREADS
-    // sets it by hand).
+    // sets it by hand). Set before spawning the multi-threaded Tokio runtime.
     if std::env::var_os("RAYON_NUM_THREADS").is_none() {
         let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
         std::env::set_var(
@@ -209,6 +308,13 @@ async fn main() -> Result<()> {
             cores.saturating_sub(1).clamp(1, 4).to_string(),
         );
     }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<()> {
     let cfg = load_config()?;
     let app = AppState::new(cfg);
     if let Some(dir) = app.db_path.parent() {
@@ -858,6 +964,20 @@ mod tests {
         post(&app, "/batch/clean", &clean(tmp.path())).await;
         wait_idle(&app).await;
         assert!(root.join("holiday.jpg").exists());
+        // Nor from a sibling directory outside the root, or a symlink escaping it.
+        let sibling = tmp.path().join("family");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("photo.jpg"), b"photo").unwrap();
+        post(&app, "/batch/clean", &clean(&sibling)).await;
+        wait_idle(&app).await;
+        assert!(sibling.join("photo.jpg").exists());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&sibling, root.join("link")).unwrap();
+            post(&app, "/batch/clean", &clean(&root.join("link"))).await;
+            wait_idle(&app).await;
+            assert!(sibling.join("photo.jpg").exists());
+        }
         post(&app, "/batch/clean", &clean(&root.join("backup"))).await;
         wait_idle(&app).await;
         assert!(!root.join("backup/preview.jpg").exists());
@@ -934,5 +1054,132 @@ mod tests {
             "{note:?}"
         );
         assert_eq!(app.cfg_saved().repo, old);
+    }
+
+    #[tokio::test]
+    async fn security_headers_and_auth_edge_cases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let res = router(app.clone())
+            .oneshot(HttpRequest::get("/log").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers().get("x-frame-options").unwrap(), "DENY");
+        assert_eq!(
+            res.headers().get("content-security-policy").unwrap(),
+            "frame-ancestors 'none'"
+        );
+        assert_eq!(
+            res.headers().get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        assert_eq!(res.headers().get("referrer-policy").unwrap(), "same-origin");
+
+        // Sec-Fetch-Site: cross-site is refused on POST even without Origin.
+        let req = HttpRequest::post("/jobs/cancel")
+            .header("sec-fetch-site", "cross-site")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("name=x"))
+            .unwrap();
+        assert_eq!(send(&app, req).await.0, StatusCode::FORBIDDEN);
+
+        // home_name validates bracketed IPv6 and matches .local case-insensitively.
+        assert_eq!(
+            send(
+                &app,
+                HttpRequest::get("/log")
+                    .header(header::HOST, "NAS.LOCAL")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                &app,
+                HttpRequest::get("/log")
+                    .header(header::HOST, "[evil.example]")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // Basic auth accepts lowercase scheme.
+        let locked = test_app(tmp.path(), Some("secret"));
+        let auth = format!(
+            "basic {}",
+            base64::engine::general_purpose::STANDARD.encode("me:secret")
+        );
+        let req = HttpRequest::get("/log")
+            .header(header::AUTHORIZATION, auth)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(send(&locked, req).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn jobs_cancel_refuses_open_redirect_and_idle_poll_returns_no_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let cancel_from = |referer: &str| {
+            HttpRequest::post("/jobs/cancel")
+                .header(header::HOST, "nas:8080")
+                .header(header::REFERER, referer)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("name=x"))
+                .unwrap()
+        };
+        let res = router(app.clone())
+            .oneshot(cancel_from("http://nas:8080//evil.example/phish"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(res.headers().get(header::LOCATION).unwrap(), "/images");
+
+        let res = router(app.clone())
+            .oneshot(cancel_from("http://nas:8080/batch"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(res.headers().get(header::LOCATION).unwrap(), "/batch");
+
+        // Idle poll with matching generation returns 204 so open details stay open.
+        let gen_id = app.jobs.snapshot().generation;
+        assert_eq!(
+            get(&app, &format!("/jobs?gen={gen_id}")).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(get(&app, "/jobs").await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn sql_condition_rejects_oversized_blob_and_empty_repo_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(tmp.path(), None);
+        let inbox = tmp.path().join("inbox");
+        frame(&inbox, "a.fits", "M 31", "2026-01-20T01:00:00");
+        let form = format!("folder={}&placement=move&on_conflict=skip", inbox.display());
+        post(&app, "/load", &form).await;
+        wait_idle(&app).await;
+
+        let (_, rows) = get(
+            &app,
+            "/images/rows?sql=length(zeroblob(1000000000))%20%3E%200",
+        )
+        .await;
+        assert!(rows.contains("SQL:"), "{rows}");
+
+        // Empty repository path in settings is refused before saving.
+        let old = app.cfg_saved().repo;
+        post(&app, "/settings", "repo=%20%20&on_conflict=skip").await;
+        assert_eq!(app.cfg_saved().repo, old);
+        let note = &app.jobs.snapshot().notes[0];
+        assert!(note.0 && note.1.contains("repository"), "{note:?}");
     }
 }

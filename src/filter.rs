@@ -18,13 +18,20 @@ pub struct Filter {
 
 /// Whether a comparison key looks like a catalogue number: M76, NGC7000, C36.
 fn is_designation(key: &str) -> bool {
-    const CATALOGUES: [&str; 14] = [
-        "M", "NGC", "IC", "C", "SH2", "LDN", "LBN", "B", "ABELL", "VDB", "PGC", "UGC", "MEL", "CR",
+    const CATALOGUES: [&str; 13] = [
+        "M", "NGC", "IC", "C", "LDN", "LBN", "B", "ABELL", "VDB", "PGC", "UGC", "MEL", "CR",
     ];
-    let digits = key.trim_start_matches(|c: char| c.is_ascii_alphabetic());
-    let prefix = &key[..key.len() - digits.len()];
-    CATALOGUES.contains(&prefix)
-        && digits.chars().next().is_some_and(|c| c.is_ascii_digit())
+    let digits = if let Some(rest) = key.strip_prefix("SH2") {
+        rest
+    } else {
+        let digits = key.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+        let prefix = &key[..key.len() - digits.len()];
+        if !CATALOGUES.contains(&prefix) {
+            return false;
+        }
+        digits
+    };
+    digits.chars().next().is_some_and(|c| c.is_ascii_digit())
         && digits
             .trim_end_matches(|c: char| c.is_ascii_alphabetic())
             .chars()
@@ -209,5 +216,18 @@ mod tests {
         assert_eq!(run("c8"), vec![0]);
         assert_eq!(run("C 8"), vec![0]);
         assert!(run("c 36").is_empty());
+        // Uncatalogued Sh2 designation (digits in prefix) must not match "101" elsewhere.
+        let mut t101 = file("M 31", "LIGHT", "L", "2026-09-01T22:01:01");
+        t101.telescope = Some("Sh2".into());
+        let sh_files = vec![t101];
+        let sh_run = |q: &str| {
+            let f = Filter {
+                q: q.into(),
+                ..Default::default()
+            };
+            apply(&sh_files, &BTreeMap::new(), &f)
+        };
+        assert!(sh_run("Sh2 101").is_empty());
+        assert!(sh_run("Sh2-101").is_empty());
     }
 }

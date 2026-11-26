@@ -5,8 +5,13 @@ name: Docker image
 # tab publishes the image from the branch, without a release.
 on:
   push:
+    branches: ["main"]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   IMAGE: ntmb/astrofiler-web
@@ -17,11 +22,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
   publish:
     needs: test
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

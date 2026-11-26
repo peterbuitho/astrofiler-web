@@ -15,13 +15,29 @@ const QUIET_MINUTES: i64 = 15;
 /// How long a run waits for the folder to become quiet.
 const GIVE_UP_HOURS: i64 = 6;
 
-/// Whether the time of day `at` was passed between two looks at the clock.
-/// A program started after it waits for the next night.
-fn due(prev: NaiveDateTime, now: NaiveDateTime, at: (u32, u32)) -> bool {
-    [prev.date(), now.date()].iter().any(|day| {
+/// Which local date's time of day `at` was passed between two looks at the
+/// clock. A program started after it waits for the next night.
+fn due_day(prev: NaiveDateTime, now: NaiveDateTime, at: (u32, u32)) -> Option<chrono::NaiveDate> {
+    [prev.date(), now.date()].into_iter().find(|day| {
         day.and_hms_opt(at.0, at.1, 0)
             .is_some_and(|t| prev < t && t <= now)
     })
+}
+
+fn should_schedule(
+    last_run: &mut Option<(chrono::NaiveDate, (u32, u32))>,
+    prev: NaiveDateTime,
+    now: NaiveDateTime,
+    at: (u32, u32),
+) -> bool {
+    let Some(day) = due_day(prev, now, at) else {
+        return false;
+    };
+    if *last_run == Some((day, at)) {
+        return false;
+    }
+    *last_run = Some((day, at));
+    true
 }
 
 /// How many files are under `dir`, and when the latest was changed. A time
@@ -32,10 +48,19 @@ fn newest(dir: &Path, limit: SystemTime, found: &mut (usize, Option<SystemTime>)
         return;
     };
     for e in rd.flatten() {
-        let Ok(meta) = e.metadata() else { continue };
-        if meta.is_dir() {
+        // Ignore hidden files/folders and NAS metadata (@eaDir, #recycle).
+        if e.file_name().to_string_lossy().starts_with(['.', '@', '#']) {
+            continue;
+        }
+        let Ok(ft) = e.file_type() else { continue };
+        // Never follow symlinks so a cycle cannot overflow the stack.
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
             newest(&e.path(), limit, found);
-        } else if !e.file_name().to_string_lossy().starts_with('.') {
+        } else if ft.is_file() {
+            let Ok(meta) = e.metadata() else { continue };
             found.0 += 1;
             found.1 = found.1.max(meta.modified().ok().filter(|t| *t < limit));
         }
@@ -88,14 +113,15 @@ pub fn start(app: App) {
         // A run that is waiting for the folder: when to look again, and
         // when to stop trying.
         let mut waiting: Option<(NaiveDateTime, NaiveDateTime)> = None;
+        let mut last_run: Option<(chrono::NaiveDate, (u32, u32))> = None;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(30));
             let now = Local::now().naive_local();
             let Some(at) = crate::pages::nightly_time(&app) else {
-                (prev, waiting) = (now, None);
+                (prev, waiting, last_run) = (now, None, None);
                 continue;
             };
-            if due(prev, now, at) {
+            if should_schedule(&mut last_run, prev, now, at) {
                 waiting = Some((now, now + Duration::hours(GIVE_UP_HOURS)));
             }
             prev = now;
@@ -130,6 +156,10 @@ mod tests {
         NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").unwrap()
     }
 
+    fn due(prev: NaiveDateTime, now: NaiveDateTime, at: (u32, u32)) -> bool {
+        due_day(prev, now, at).is_some()
+    }
+
     #[test]
     fn due_once_when_the_time_is_passed() {
         let at = (2, 0);
@@ -145,6 +175,48 @@ mod tests {
             (0, 0)
         ));
         assert!(due(t("2026-10-05 23:00:00"), t("2026-10-06 03:00:00"), at));
+    }
+
+    #[test]
+    fn dst_fallback_only_schedules_once_per_day() {
+        let at = (1, 30);
+        let mut last_run = None;
+        // First pass of 01:30 (BST) triggers.
+        assert!(should_schedule(
+            &mut last_run,
+            t("2026-10-25 01:29:40"),
+            t("2026-10-25 01:30:10"),
+            at
+        ));
+        // Clocks fell back from 02:00 to 01:00; passing 01:30 again does not re-trigger.
+        assert!(!should_schedule(
+            &mut last_run,
+            t("2026-10-25 01:29:40"),
+            t("2026-10-25 01:30:10"),
+            at
+        ));
+        // Next night triggers normally.
+        assert!(should_schedule(
+            &mut last_run,
+            t("2026-10-26 01:29:40"),
+            t("2026-10-26 01:30:10"),
+            at
+        ));
+    }
+
+    #[test]
+    fn nas_metadata_and_symlinks_are_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        std::fs::create_dir_all(tmp.path().join("@eaDir/sub")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("#recycle")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".hidden")).unwrap();
+        std::fs::write(tmp.path().join("@eaDir/sub/SYNOFILE_THUMB_M.jpg"), b"x").unwrap();
+        std::fs::write(tmp.path().join("#recycle/old.fits"), b"x").unwrap();
+        std::fs::write(tmp.path().join(".hidden/a.fits"), b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tmp.path(), tmp.path().join("loop")).unwrap();
+        assert!(matches!(look(tmp.path(), now), Folder::Empty));
     }
 
     #[test]

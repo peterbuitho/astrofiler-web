@@ -26,13 +26,16 @@ services:
       - /volume1/photo:/photo
       - /volume1/docker/astrofiler:/data
 
-  # Checks Docker Hub once a day and updates the astrofiler container when a
-  # new image is there. Only the container named "astrofiler" is touched.
+  # Optional: checks Docker Hub once a day and updates the astrofiler container
+  # when a new image is there. Disabled by default (run with
+  # `docker compose --profile autoupdate up -d`) because mounting docker.sock
+  # grants host-root control and containrrr/watchtower is unmaintained.
   watchtower:
+    profiles: ["autoupdate"]
     image: containrrr/watchtower
     restart: unless-stopped
     environment:
       TZ: Europe/London
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    command: astrofiler --interval 86400 --cleanup
+    command: astrofiler --interval 86400 --cleanup --stop-timeout 120s

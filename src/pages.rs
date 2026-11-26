@@ -55,6 +55,10 @@ fn sql_ids(app: &App, clause: &str) -> anyhow::Result<Option<std::collections::H
     }
     let conn = app.conn()?;
     conn.pragma_update(None, "query_only", true)?;
+    conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_000_000);
+    conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_SQL_LENGTH, 10_000);
+    conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_COMPOUND_SELECT, 10);
+    conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_EXPR_DEPTH, 100);
     // A condition that compares every file with every other would run for
     // minutes, and again on each reload of the table.
     let started = std::time::Instant::now();
@@ -345,6 +349,7 @@ async fn image_rows(State(app): State<App>, Query(query): Query<RowsQuery>) -> P
                 .exptime
                 .as_deref()
                 .and_then(|e| e.parse::<f64>().ok())
+                .filter(|v| v.is_finite() && *v >= 0.0)
                 .unwrap_or(0.0);
             let day: String = opt(&file.date).chars().take(10).collect();
             if !day.is_empty() {
@@ -466,22 +471,27 @@ async fn image_rows(State(app): State<App>, Query(query): Query<RowsQuery>) -> P
     })
 }
 
+fn json_quote(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// The extra request values that ask for the files of one group, as JSON.
 fn group_vals(by: &str, key: &str) -> String {
-    let quote = |s: &str| {
-        let mut out = String::from("\"");
-        for c in s.chars() {
-            match c {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
-            }
-        }
-        out.push('"');
-        out
-    };
-    format!("{{\"group\":{},\"key\":{}}}", quote(by), quote(key))
+    format!(
+        "{{\"group\":{},\"key\":{}}}",
+        json_quote(by),
+        json_quote(key)
+    )
 }
 
 /// The table of files; `sortable` headers re-sort the whole page.
@@ -522,7 +532,7 @@ fn file_table(app: &App, files: &[FitsFile], sortable: bool) -> Markup {
                         td class="c2 file link" title={ (f.name) " (click to copy the path)" }
                             data-path=(app.desktop_path(&f.name))
                             onclick="copyText(this.dataset.path)" { (f.file_name()) }
-                        td { a href={ "/images/file?id=" (f.id) } title="Download, then open with the default app" { "Open" } }
+                        td { a href={ "/images/file?id=" (url_encode(&f.id)) } title="Download, then open with the default app" { "Open" } }
                     }
                 }
             }
@@ -544,7 +554,13 @@ async fn image_file(
     let Ok(f) = tokio::fs::File::open(&path).await else {
         return Ok((StatusCode::NOT_FOUND, "The file is missing on disk").into_response());
     };
-    let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let Ok(meta) = f.metadata().await else {
+        return Ok((StatusCode::NOT_FOUND, "The file is missing on disk").into_response());
+    };
+    if !meta.is_file() {
+        return Ok((StatusCode::NOT_FOUND, "The file is missing on disk").into_response());
+    }
+    let len = meta.len();
     let name: String = file
         .file_name()
         .chars()
@@ -599,9 +615,11 @@ struct Selection {
 }
 
 impl Selection {
-    fn ids(&self, app: &App) -> anyhow::Result<Vec<String>> {
+    /// Returns `Ok(None)` when the SQL condition failed (the error is reported
+    /// in the job panel instead of returning an HTTP 500).
+    fn ids(&self, app: &App) -> anyhow::Result<Option<Vec<String>>> {
         if !ticked(&self.all) && self.grp.is_empty() {
-            return Ok(self.id.clone());
+            return Ok(Some(self.id.clone()));
         }
         let files = db::all_files(&app.conn()?, false)?;
         let f = Filter {
@@ -609,18 +627,30 @@ impl Selection {
             kind: self.kind.clone(),
             ..Default::default()
         };
-        let sql = sql_ids(app, &self.sql)?;
+        let sql = match sql_ids(app, &self.sql) {
+            Ok(s) => s,
+            Err(e) => {
+                app.jobs.note(true, format!("SQL: {e:#}"));
+                return Ok(None);
+            }
+        };
         // Everything that matches, or the ticked groups plus the ticked files.
         let all = ticked(&self.all);
-        Ok(filter::apply(&files, &app.cfg().object_names, &f)
-            .into_iter()
-            .map(|i| &files[i])
-            .filter(|f| sql.as_ref().is_none_or(|s| s.contains(&f.id)))
-            .filter(|f| {
-                all || self.id.contains(&f.id) || self.grp.contains(&group_key(f, &self.group))
-            })
-            .map(|f| f.id.clone())
-            .collect())
+        let id_set: std::collections::HashSet<&str> = self.id.iter().map(String::as_str).collect();
+        let grp_set: std::collections::HashSet<&str> =
+            self.grp.iter().map(String::as_str).collect();
+        Ok(Some(
+            filter::apply(&files, &app.cfg().object_names, &f)
+                .into_iter()
+                .map(|i| &files[i])
+                .filter(|f| sql.as_ref().is_none_or(|s| s.contains(&f.id)))
+                .filter(|f| {
+                    all || id_set.contains(f.id.as_str())
+                        || grp_set.contains(group_key(f, &self.group).as_str())
+                })
+                .map(|f| f.id.clone())
+                .collect(),
+        ))
     }
 }
 
@@ -647,7 +677,9 @@ async fn images_edit(
 ) -> Result<Redirect, AppError> {
     let a = app.clone();
     blocking(move || {
-        let ids = sel.ids(&a)?;
+        let Some(ids) = sel.ids(&a)? else {
+            return Ok(());
+        };
         let opts = EditOptions {
             update_headers: ticked(&sel.headers),
             refile: ticked(&sel.refile),
@@ -673,7 +705,9 @@ async fn images_export(
             a.jobs.note(true, "Export: no folder given".into());
             return Ok(());
         }
-        let ids = sel.ids(&a)?;
+        let Some(ids) = sel.ids(&a)? else {
+            return Ok(());
+        };
         let dest = PathBuf::from(sel.dest.trim());
         let layout = if ticked(&sel.by_object) {
             ExportLayout::ByObject
@@ -695,7 +729,9 @@ async fn images_export(
 async fn delete(app: App, sel: Selection, from_disk: bool) -> Result<Redirect, AppError> {
     let a = app.clone();
     blocking(move || {
-        let ids = sel.ids(&a)?;
+        let Some(ids) = sel.ids(&a)? else {
+            return Ok(());
+        };
         a.jobs.spawn("Delete", move |conn, _, _| {
             let (n, errs) = batch::delete_files(conn, &ids, from_disk)?;
             for (f, e) in &errs {
@@ -732,8 +768,9 @@ async fn images_delete(
 
 // -------------------------------------------------------------------- Load
 
-async fn load(State(app): State<App>) -> Markup {
-    let cfg = app.cfg();
+async fn load(State(app): State<App>) -> Page {
+    let a = app.clone();
+    let cfg = blocking(move || Ok(a.cfg())).await?;
     let body = html! {
         h2 { "Load images" }
         form method="post" action="/load" {
@@ -765,7 +802,7 @@ async fn load(State(app): State<App>) -> Markup {
         p { "Catalogue files already in the repository (" (cfg.repo.display()) ") without moving them." }
         form method="post" action="/sync" { button { "Sync repository" } }
     };
-    page(&app, "/load", false, body)
+    Ok(page(&app, "/load", false, body))
 }
 
 #[derive(Deserialize, Default)]
@@ -779,57 +816,75 @@ struct LoadForm {
     dry_run: Option<String>,
 }
 
-async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Redirect {
-    let src = PathBuf::from(f.folder.trim());
-    if f.folder.trim().is_empty() || !src.is_dir() {
-        app.jobs
-            .note(true, format!("Load: {} is not a folder", src.display()));
-        return Redirect::to("/load");
-    }
-    let placement = match f.placement.as_str() {
-        "copy" => Placement::Copy,
-        "in_place" => Placement::InPlace,
-        _ => Placement::Move,
-    };
-    let cfg = app.cfg();
-    let opts = IngestOptions {
-        placement,
-        dry_run: ticked(&f.dry_run),
-        on_conflict: OnConflict::parse(&f.on_conflict).unwrap_or(cfg.on_conflict),
-        quick: false,
-        object_from_folder: ticked(&f.object_from_folder),
-    };
-    if placement == Placement::Move {
-        if let Some(why) = filed_already(&cfg, &src) {
-            app.jobs.note(true, format!("Load: {why}"));
-            return Redirect::to("/load");
+async fn load_start(State(app): State<App>, Form(f): Form<LoadForm>) -> Result<Redirect, AppError> {
+    let a = app.clone();
+    let dry_run = ticked(&f.dry_run);
+    let ok = blocking(move || {
+        let src = PathBuf::from(f.folder.trim());
+        if f.folder.trim().is_empty() || !src.is_dir() {
+            a.jobs
+                .note(true, format!("Load: {} is not a folder", src.display()));
+            return Ok(false);
         }
-    }
-    let remove_known = ticked(&f.remove_known) && placement == Placement::Move && !opts.dry_run;
-    let dry_run = opts.dry_run;
-    app.jobs.submit(
-        if dry_run { "Dry run" } else { "Load" },
-        !dry_run,
-        Box::new(move |conn, cfg, p| run_load(conn, cfg, p, &src, opts, remove_known)),
-    );
+        let placement = match f.placement.as_str() {
+            "copy" => Placement::Copy,
+            "in_place" => Placement::InPlace,
+            _ => Placement::Move,
+        };
+        let cfg = a.cfg();
+        let opts = IngestOptions {
+            placement,
+            dry_run: ticked(&f.dry_run),
+            on_conflict: OnConflict::parse(&f.on_conflict).unwrap_or(cfg.on_conflict),
+            quick: false,
+            object_from_folder: ticked(&f.object_from_folder),
+        };
+        if placement == Placement::Move {
+            if let Some(why) = filed_already(&cfg, &src) {
+                a.jobs.note(true, format!("Load: {why}"));
+                return Ok(false);
+            }
+        }
+        let remove_known = ticked(&f.remove_known) && placement == Placement::Move && !opts.dry_run;
+        a.jobs.submit(
+            if opts.dry_run { "Dry run" } else { "Load" },
+            !opts.dry_run,
+            Box::new(move |conn, cfg, p| run_load(conn, cfg, p, &src, opts, remove_known)),
+        );
+        Ok(true)
+    })
+    .await?;
     // A dry run leaves everything in place: stay on this page, where the job
     // panel shows its summary (and the dry run tick is cleared). A real load
     // goes to the Images page, where the newly filed frames are.
-    Redirect::to(if dry_run { "/load" } else { "/images" })
+    Ok(Redirect::to(if !ok || dry_run {
+        "/load"
+    } else {
+        "/images"
+    }))
 }
 
 /// Why nothing is moved (or deleted) out of `src`: it is one of the
-/// repository's organised folders, or lies in one.
+/// repository's organised folders, lies in one, or holds the repository.
 fn filed_already(cfg: &astrofiler::config::Config, src: &Path) -> Option<String> {
     let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let path = real(src);
-    let dir = ingest::MANAGED_DIRS
+    if let Some(dir) = ingest::MANAGED_DIRS
         .iter()
-        .find(|d| path.starts_with(real(&cfg.repo.join(d))))?;
-    Some(format!(
-        "{} is in the repository's {dir} folder: files there are already filed and are not moved or deleted",
-        src.display()
-    ))
+        .find(|d| path.starts_with(real(&cfg.repo.join(d))))
+    {
+        return Some(format!(
+            "{} is in the repository's {dir} folder: files there are already filed and are not moved or deleted",
+            src.display()
+        ));
+    }
+    if real(&cfg.repo).starts_with(&path) {
+        return Some(format!(
+            "{} holds the repository: files in it are already filed and are not moved or deleted",
+            src.display()
+        ));
+    }
+    None
 }
 
 /// File a folder into the repository and say what happened: the Load page's
@@ -932,7 +987,7 @@ async fn sessions_page(State(app): State<App>) -> Page {
                     } }
                     tbody {
                         @for s in &list {
-                            tr class="pick" hx-get="/sessions/files" hx-vals={"{\"id\":\"" (s.id) "\"}"}
+                            tr class="pick" hx-get="/sessions/files" hx-vals={"{\"id\":" (json_quote(&s.id)) "}"}
                                 hx-target="#session-files" {
                                 td { @if s.is_calibration() { em { (opt(&s.object)) } } @else { (opt(&s.object)) } }
                                 td { (opt(&s.date)) }
@@ -1235,46 +1290,60 @@ struct CleanForm {
     mode: String,
 }
 
-async fn batch_clean(State(app): State<App>, Form(f): Form<CleanForm>) -> Redirect {
-    let dir = PathBuf::from(f.dir.trim());
-    if f.dir.trim().is_empty() || !dir.is_dir() {
-        app.jobs.note(
-            true,
-            format!("Clean previews: {} is not a folder", dir.display()),
+async fn batch_clean(
+    State(app): State<App>,
+    Form(f): Form<CleanForm>,
+) -> Result<Redirect, AppError> {
+    let a = app.clone();
+    blocking(move || {
+        let dir = PathBuf::from(f.dir.trim());
+        if f.dir.trim().is_empty() || !dir.is_dir() {
+            a.jobs.note(
+                true,
+                format!("Clean previews: {} is not a folder", dir.display()),
+            );
+            return Ok(());
+        }
+        let dry_run = f.mode != "delete";
+        // It deletes every JPG and PNG, and the picker's root (or a folder
+        // holding it) is often a whole share. Require a strict subfolder of root.
+        let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let root = real(&a.root);
+        let target = real(&dir);
+        if !dry_run && (!target.starts_with(&root) || target == root) {
+            a.jobs.note(
+                true,
+                format!(
+                    "Clean previews: choose a folder inside {}",
+                    a.root.display()
+                ),
+            );
+            return Ok(());
+        }
+        a.jobs.submit(
+            "Clean previews",
+            !dry_run,
+            Box::new(move |_, _, _| {
+                let (files, bytes) = batch::clean_previews(&dir, dry_run)?;
+                Ok(if dry_run {
+                    format!(
+                        "{} preview files ({}) would be deleted",
+                        files.len(),
+                        util::human_size(bytes)
+                    )
+                } else {
+                    format!(
+                        "{} files deleted, {} freed",
+                        files.len(),
+                        util::human_size(bytes)
+                    )
+                })
+            }),
         );
-        return Redirect::to("/batch");
-    }
-    let dry_run = f.mode != "delete";
-    // It deletes every JPG and PNG, and the picker's root (or a folder
-    // holding it) is often a whole share.
-    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    if !dry_run && real(&app.root).starts_with(real(&dir)) {
-        app.jobs.note(
-            true,
-            format!(
-                "Clean previews: choose a folder inside {}",
-                app.root.display()
-            ),
-        );
-        return Redirect::to("/batch");
-    }
-    app.jobs.spawn_read("Clean previews", move |_, _, _| {
-        let (files, bytes) = batch::clean_previews(&dir, dry_run)?;
-        Ok(if dry_run {
-            format!(
-                "{} preview files ({}) would be deleted",
-                files.len(),
-                util::human_size(bytes)
-            )
-        } else {
-            format!(
-                "{} files deleted, {} freed",
-                files.len(),
-                util::human_size(bytes)
-            )
-        })
-    });
-    Redirect::to("/batch")
+        Ok(())
+    })
+    .await?;
+    Ok(Redirect::to("/batch"))
 }
 
 // -------------------------------------------------------------- Duplicates
@@ -1474,6 +1543,26 @@ fn merge_names(rows: Vec<(String, f64)>, same: &[(String, String)]) -> Vec<(Stri
     out
 }
 
+fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
+    let tmp = path.with_file_name(format!(".{name}.tmp.{}.{seq}", std::process::id()));
+    let mut f = std::fs::File::create(&tmp)?;
+    if let Err(e) = f.write_all(data).and_then(|()| f.sync_all()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    drop(f);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// The last statistics shown, kept so the page appears at once.
 fn stats_saved_path(app: &App) -> PathBuf {
     app.db_path.with_file_name("stats.html")
@@ -1482,7 +1571,7 @@ fn stats_saved_path(app: &App) -> PathBuf {
 /// The statistics as last calculated, with a note that they are being
 /// recalculated; the fresh ones replace them when ready.
 async fn stats_page(State(app): State<App>) -> Markup {
-    let saved = std::fs::read_to_string(stats_saved_path(&app)).ok();
+    let saved = tokio::fs::read_to_string(stats_saved_path(&app)).await.ok();
     let body = html! {
         // The page frame's own hx-select and hx-target would be inherited.
         div id="stats" hx-get="/stats/fresh" hx-trigger="load" hx-target="this" hx-select="#stats"
@@ -1500,78 +1589,88 @@ async fn stats_page(State(app): State<App>) -> Markup {
 
 async fn stats_fresh(State(app): State<App>) -> Page {
     let a = app.clone();
-    let s = blocking(move || stats::compute(&a.conn()?)).await?;
-    let cfg = app.cfg();
-    // The panels of a mosaic are one object here.
-    let mut objects: Vec<(String, usize, f64)> = Vec::new();
-    for (o, n, e) in &s.by_object {
-        let o = names::mosaic(o).0;
-        match objects.iter_mut().find(|(name, _, _)| *name == o) {
-            Some(row) => {
-                row.1 += n;
-                row.2 += e;
-            }
-            None => objects.push((o, *n, *e)),
-        }
-    }
-    objects.sort_by(|a, b| b.2.total_cmp(&a.2));
-    let by_object: Vec<(String, f64)> = objects
-        .iter()
-        .map(|(o, n, e)| {
-            let label = match names::common_name(o, &cfg.object_names) {
-                Some(name) => format!("{o} {name} ({n})"),
-                None => format!("{o} ({n})"),
-            };
-            (label, *e)
-        })
-        .collect();
-    // Names that mean the same thing are added up; the files keep theirs.
-    let same = stats_names(&app);
-    let count = |v: &[(String, usize)]| {
-        let rows: Vec<(String, f64)> = v.iter().map(|(t, n)| (t.clone(), *n as f64)).collect();
-        merge_names(rows, &same)
-    };
-    let body = html! {
-        div class="grid" {
-            strong { "Files" }
-            span { (s.total_files) " (" (s.light_files) " lights, " (s.calibration_files) " calibration)" }
-            strong { "Size on disk" } span { (util::human_size(s.total_bytes)) }
-            strong { "Sessions" } span { (s.sessions) }
-            strong { "Date range" } span { (opt(&s.first_date)) " → " (opt(&s.last_date)) }
-            strong { "Total integration" } span { (stats::hours(s.by_object.iter().map(|o| o.2).sum())) }
-        }
-        div class="columns" {
-            div { (bars("Integration by object", by_object, true)) }
-            div {
-                (bars("Integration by filter", merge_names(s.by_filter.clone(), &same), true))
-                (bars("Frames by telescope", count(&s.by_telescope), false))
-                (bars("Frames by camera", count(&s.by_instrument), false))
+    let body = blocking(move || {
+        let s = stats::compute(&a.conn()?)?;
+        let cfg = a.cfg();
+        // The panels of a mosaic are one object here.
+        let mut objects: Vec<(String, usize, f64)> = Vec::new();
+        for (o, n, e) in &s.by_object {
+            let o = names::mosaic(o).0;
+            match objects.iter_mut().find(|(name, _, _)| *name == o) {
+                Some(row) => {
+                    row.1 += n;
+                    row.2 += e;
+                }
+                None => objects.push((o, *n, *e)),
             }
         }
-    };
-    if let Err(e) = std::fs::write(stats_saved_path(&app), &body.0) {
-        log::warn!("Statistics not saved: {e}");
-    }
+        objects.sort_by(|a, b| b.2.total_cmp(&a.2));
+        let by_object: Vec<(String, f64)> = objects
+            .iter()
+            .map(|(o, n, e)| {
+                let label = match names::common_name(o, &cfg.object_names) {
+                    Some(name) => format!("{o} {name} ({n})"),
+                    None => format!("{o} ({n})"),
+                };
+                (label, *e)
+            })
+            .collect();
+        // Names that mean the same thing are added up; the files keep theirs.
+        let same = stats_names(&a);
+        let count = |v: &[(String, usize)]| {
+            let rows: Vec<(String, f64)> = v.iter().map(|(t, n)| (t.clone(), *n as f64)).collect();
+            merge_names(rows, &same)
+        };
+        let body = html! {
+            div class="grid" {
+                strong { "Files" }
+                span { (s.total_files) " (" (s.light_files) " lights, " (s.calibration_files) " calibration)" }
+                strong { "Size on disk" } span { (util::human_size(s.total_bytes)) }
+                strong { "Sessions" } span { (s.sessions) }
+                strong { "Date range" } span { (opt(&s.first_date)) " → " (opt(&s.last_date)) }
+                strong { "Total integration" } span { (stats::hours(s.by_object.iter().map(|o| o.2).sum())) }
+            }
+            div class="columns" {
+                div { (bars("Integration by object", by_object, true)) }
+                div {
+                    (bars("Integration by filter", merge_names(s.by_filter.clone(), &same), true))
+                    (bars("Frames by telescope", count(&s.by_telescope), false))
+                    (bars("Frames by camera", count(&s.by_instrument), false))
+                }
+            }
+        };
+        if let Err(e) = write_atomic(&stats_saved_path(&a), body.0.as_bytes()) {
+            log::warn!("Statistics not saved: {e}");
+        }
+        Ok(body)
+    })
+    .await?;
     Ok(html! { div id="stats" { (body) } })
 }
 
 // ---------------------------------------------------------------- Settings
 
-async fn settings(State(app): State<App>) -> Markup {
-    let c = app.cfg_saved();
-    let nicknames: String = app
-        .conn()
-        .map(|conn| nick::load(&conn))
-        .unwrap_or_default()
-        .iter()
-        .map(|(o, n)| format!("{o} = {n}\n"))
-        .collect();
+async fn settings(State(app): State<App>) -> Page {
+    let a = app.clone();
+    let (c, nicknames, nightly, stats_names) = blocking(move || {
+        let c = a.cfg_saved();
+        let nicknames: String = a
+            .conn()
+            .map(|conn| nick::load(&conn))
+            .unwrap_or_default()
+            .iter()
+            .map(|(o, n)| format!("{o} = {n}\n"))
+            .collect();
+        let nightly = nightly_time(&a);
+        let stats_names = stats_names_text(&a);
+        Ok((c, nicknames, nightly, stats_names))
+    })
+    .await?;
     let object_names: String = c
         .object_names
         .iter()
         .map(|(o, n)| format!("{o} = {n}\n"))
         .collect();
-    let nightly = nightly_time(&app);
     let at = nightly.unwrap_or((2, 0));
     let body = html! {
         form method="post" action="/settings" {
@@ -1610,14 +1709,14 @@ async fn settings(State(app): State<App>) -> Markup {
                 label { "Statistics names" }
                 div {
                     p class="muted" { "Telescope, camera and filter names that are the same thing are added up on the Statistics page, one per line as \"DWARFIII = DWARF 3\". Only the page changes: the files and the catalogue keep their names." }
-                    textarea name="stats_names" rows="8" cols="50" { (stats_names_text(&app)) }
+                    textarea name="stats_names" rows="8" cols="50" { (stats_names) }
                 }
             }
             p { button { "Save settings" } }
         }
         p class="muted" { "Config file: " (c.path.display()) br; "Database: " (app.db_path.display()) }
     };
-    page(&app, "/settings", false, body)
+    Ok(page(&app, "/settings", false, body))
 }
 
 #[derive(Deserialize, Default)]
@@ -1635,66 +1734,94 @@ struct SettingsForm {
     stats_names: String,
 }
 
-async fn settings_save(State(app): State<App>, Form(f): Form<SettingsForm>) -> Redirect {
-    let mut c = app.cfg_saved();
-    c.repo = PathBuf::from(f.repo.trim());
-    c.source = PathBuf::from(f.source.trim());
-    c.save_modified_headers = ticked(&f.save_modified_headers);
-    c.on_conflict = OnConflict::parse(&f.on_conflict).unwrap_or(c.on_conflict);
-    let pairs = |text: &str| -> Vec<(String, String)> {
-        text.lines()
-            .filter_map(|l| l.split_once('='))
-            .map(|(o, n)| (o.trim().to_string(), n.trim().to_string()))
-            .filter(|(o, _)| !o.is_empty())
-            .collect()
-    };
-    c.object_names = pairs(&f.object_names).into_iter().collect();
-    let nicknames: Vec<_> = pairs(&f.nicknames)
-        .into_iter()
-        .filter(|(_, n)| !n.is_empty())
-        .collect();
-    let nightly = ticked(&f.nightly).then(|| parse_time(&f.nightly_time));
-    if nightly == Some(None) {
-        app.jobs.note(
-            true,
-            "Settings not saved: the nightly load needs a time".into(),
-        );
-        return Redirect::to("/settings");
-    }
-    // Nicknames left as the page showed them are not written back: a load
-    // may have learned more since.
-    let lines = |s: &str| s.replace('\r', "").trim().to_string();
-    let edited = f
-        .nicknames_shown
-        .first()
-        .is_none_or(|shown| lines(shown) != lines(&f.nicknames));
-    if let Err(e) = c.save() {
-        app.jobs
-            .note(true, format!("Could not save settings: {e:#}"));
-        return Redirect::to("/settings");
-    }
-    // The file is written, so the program follows it whatever fails below.
-    *app.cfg.write().unwrap() = c;
-    let saved = (|| -> anyhow::Result<()> {
+async fn settings_save(
+    State(app): State<App>,
+    Form(f): Form<SettingsForm>,
+) -> Result<Redirect, AppError> {
+    let a = app.clone();
+    blocking(move || {
+        let mut c = a.cfg_saved();
+        c.repo = PathBuf::from(f.repo.trim());
+        c.source = PathBuf::from(f.source.trim());
+        if c.repo.as_os_str().is_empty() {
+            a.jobs.note(
+                true,
+                "Settings not saved: repository folder is required".into(),
+            );
+            return Ok(());
+        }
+        c.save_modified_headers = ticked(&f.save_modified_headers);
+        c.on_conflict = OnConflict::parse(&f.on_conflict).unwrap_or(c.on_conflict);
+        let pairs = |text: &str| -> Vec<(String, String)> {
+            text.lines()
+                .filter_map(|l| l.split_once('='))
+                .map(|(o, n)| (o.trim().to_string(), n.trim().to_string()))
+                .filter(|(o, _)| !o.is_empty())
+                .collect()
+        };
+        c.object_names = pairs(&f.object_names).into_iter().collect();
+        let nicknames: Vec<_> = pairs(&f.nicknames)
+            .into_iter()
+            .filter(|(_, n)| !n.is_empty())
+            .collect();
+        let nightly = ticked(&f.nightly).then(|| parse_time(&f.nightly_time));
+        if nightly == Some(None) {
+            a.jobs.note(
+                true,
+                "Settings not saved: the nightly load needs a time".into(),
+            );
+            return Ok(());
+        }
+        // Nicknames left as the page showed them are not written back: a load
+        // may have learned more since.
+        let lines = |s: &str| s.replace('\r', "").trim().to_string();
+        let edited = f
+            .nicknames_shown
+            .first()
+            .is_none_or(|shown| lines(shown) != lines(&f.nicknames));
+        if let Err(e) = c.save() {
+            a.jobs.note(true, format!("Could not save settings: {e:#}"));
+            return Ok(());
+        }
+        // The file is written, so the program follows it whatever fails below.
+        *a.cfg.write().unwrap() = c;
+        let mut errs = Vec::new();
         if edited {
-            nick::replace(&mut app.conn()?, &nicknames)?;
+            if let Err(e) = a
+                .conn()
+                .and_then(|mut conn| Ok(nick::replace(&mut conn, &nicknames)?))
+            {
+                errs.push(format!("{e:#}"));
+            }
         }
         let text = f.stats_names.replace("\r\n", "\n");
-        std::fs::write(stats_names_path(&app), text)?;
-        if let Some(Some((h, m))) = nightly {
-            std::fs::write(nightly_path(&app), format!("{h:02}:{m:02}\n"))?;
-        } else if nightly_path(&app).exists() {
-            std::fs::remove_file(nightly_path(&app))?;
+        if let Err(e) = write_atomic(&stats_names_path(&a), text.as_bytes()) {
+            errs.push(format!("{e}"));
+        }
+        match nightly {
+            Some(Some((h, m))) => {
+                if let Err(e) =
+                    write_atomic(&nightly_path(&a), format!("{h:02}:{m:02}\n").as_bytes())
+                {
+                    errs.push(format!("{e}"));
+                }
+            }
+            _ => match std::fs::remove_file(nightly_path(&a)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => errs.push(format!("{e}")),
+            },
+        }
+        if errs.is_empty() {
+            a.jobs.note(false, "Settings saved".into());
+        } else {
+            a.jobs
+                .note(true, format!("Settings saved, except: {}", errs.join("; ")));
         }
         Ok(())
-    })();
-    match saved {
-        Ok(()) => app.jobs.note(false, "Settings saved".into()),
-        Err(e) => app
-            .jobs
-            .note(true, format!("Settings saved, except: {e:#}")),
-    }
-    Redirect::to("/settings")
+    })
+    .await?;
+    Ok(Redirect::to("/settings"))
 }
 
 // --------------------------------------------------------------------- Log
@@ -1729,13 +1856,19 @@ async fn log_clear() -> Redirect {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct JobsQuery {
-    gen: u64,
+    gen: Option<u64>,
 }
 
 async fn jobs(State(app): State<App>, Query(q): Query<JobsQuery>) -> Response {
     let snapshot = app.jobs.snapshot();
+    if q.gen == Some(snapshot.generation)
+        && snapshot.running.is_empty()
+        && snapshot.queued.is_empty()
+    {
+        return StatusCode::NO_CONTENT.into_response();
+    }
     let panel = jobs_panel(&snapshot);
-    if snapshot.generation != q.gen {
+    if q.gen.is_some_and(|g| g != snapshot.generation) {
         ([("HX-Trigger", "refresh")], panel).into_response()
     } else {
         panel.into_response()
@@ -1753,12 +1886,14 @@ async fn jobs_cancel(
     Form(f): Form<JobName>,
 ) -> Redirect {
     app.jobs.cancel(&f.name);
-    // Back to the page the button was on.
+    // Back to the page the button was on (same-origin relative paths only).
     let back = headers
         .get(header::REFERER)
         .and_then(|v| v.to_str().ok())
         .and_then(|r| r.split_once("://"))
-        .and_then(|(_, rest)| rest.find('/').map(|i| rest[i..].to_string()))
+        .and_then(|(_, rest)| rest.find('/').map(|i| &rest[i..]))
+        .filter(|p| p.starts_with('/') && !p.starts_with("//") && !p.starts_with("/\\"))
+        .map(str::to_string)
         .unwrap_or_else(|| "/images".into());
     Redirect::to(&back)
 }

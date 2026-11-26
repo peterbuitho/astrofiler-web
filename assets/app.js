@@ -16,13 +16,27 @@ function setSearch(text) { el('q').value = text; reload(0); }
 
 // Images: selection. Shift-click ticks the rows in between.
 let lastBox = null;
+function syncMemberRow(box) {
+  const g = groupBoxOf(box);
+  if (g && g.checked && !box.checked) {
+    g.checked = false;
+    box.closest('tr.members').querySelectorAll('input.row').forEach(b => { if (b !== box) b.checked = true; });
+  }
+}
 document.addEventListener('click', e => {
   const c = e.target;
   if (!c.matches || !c.matches('input.row')) return;
   const boxes = [...document.querySelectorAll('input.row')];
   const a = boxes.indexOf(lastBox), b = boxes.indexOf(c);
   if (e.shiftKey && a >= 0) {
-    for (let i = Math.min(a, b); i <= Math.max(a, b); i++) boxes[i].checked = c.checked;
+    for (let i = Math.min(a, b); i <= Math.max(a, b); i++) {
+      boxes[i].checked = c.checked;
+      if (boxes[i].classList.contains('grp')) {
+        boxes[i].closest('tr').nextElementSibling.querySelectorAll('input.row').forEach(m => m.checked = c.checked);
+      } else if (boxes[i].closest('tr.members')) {
+        syncMemberRow(boxes[i]);
+      }
+    }
   }
   lastBox = c;
   countSelected();
@@ -69,12 +83,22 @@ function toggleGroupBox(g) {
 document.addEventListener('change', e => {
   const c = e.target;
   if (!c.matches || !c.matches('tr.members input.row')) return;
-  const g = groupBoxOf(c);
-  if (g && g.checked && !c.checked) {
-    g.checked = false;
-    c.closest('tr.members').querySelectorAll('input.row').forEach(b => { if (b !== c) b.checked = true; });
-  }
+  syncMemberRow(c);
   countSelected();
+});
+// Keep the job notes drawer open across #jobs polls.
+let notesOpen = false;
+document.addEventListener('htmx:beforeSwap', e => {
+  if (e.target && e.target.id === 'jobs') {
+    const d = e.target.querySelector('details.notes');
+    notesOpen = Boolean(d && d.open);
+  }
+});
+document.addEventListener('htmx:afterSwap', e => {
+  if (e.target && e.target.id === 'jobs' && notesOpen) {
+    const d = e.target.querySelector('details.notes');
+    if (d) d.open = true;
+  }
 });
 // Files of a ticked group arrive ticked.
 document.addEventListener('htmx:afterSwap', e => {
